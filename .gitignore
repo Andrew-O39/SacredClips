@@ -22,5 +22,5 @@ frontend/.vite/
 .env
 *.env
 
-# Generated media
+# Generated media files
 outputs/
