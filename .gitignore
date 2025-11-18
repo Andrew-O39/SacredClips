@@ -1,0 +1,26 @@
+# Python venv
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Node modules
+frontend/node_modules/
+
+# Build / dist / cache
+frontend/dist/
+frontend/.vite/
+
+# Editor / OS files
+.vscode/
+.idea/
+.DS_Store
+
+# Local env & secrets
+.env
+*.env
+
+# Generated media
+outputs/
