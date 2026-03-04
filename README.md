@@ -383,6 +383,23 @@ However, AI-generated content should **always be reviewed before publishing**, e
 
 ---
 
+# 10. Example Generated Video
+
+Topic: *The Meaning of Advent*
+
+SacredClips automatically generated the following educational short video.
+
+[Watch the generated video here](https://ghana-catholic-community-stuttgart.org/uploads/uploads/b987820034bcc212.mp4)
+
+Generated automatically using:
+
+- OpenAI GPT (script generation)
+- OpenAI Images API (scene visuals)
+- OpenAI TTS (voice narration)
+- MoviePy + FFmpeg (video rendering)
+
+---
+
 # Future Improvements
 
 Possible next steps for the project:
