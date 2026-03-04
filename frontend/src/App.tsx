@@ -18,7 +18,7 @@ type VideoResponse = {
 }
 
 export const App: React.FC = () => {
-  const [topic, setTopic] = useState('What is Ramadan?')
+  const [topic, setTopic] = useState('What is baptism in Christianity?')
   const [style, setStyle] = useState('neutral explainer, gentle and respectful tone')
   const [platform, setPlatform] = useState('tiktok')
   const [duration, setDuration] = useState(60)
@@ -125,7 +125,7 @@ export const App: React.FC = () => {
                 className="input"
                 value={topic}
                 onChange={e => setTopic(e.target.value)}
-                placeholder="e.g. What is Diwali?"
+                placeholder="e.g. What is the Eucharist?"
                 required
               />
             </div>
@@ -210,9 +210,9 @@ export const App: React.FC = () => {
           {!result && !loading && (
             <>
               <div className="pill-row">
-                <div className="pill">What is Ramadan?</div>
+                <div className="pill">What is baptism in Christianity?</div>
                 <div className="pill">Basics of baptism</div>
-                <div className="pill">Meaning of Diwali</div>
+                <div className="pill">What is the Trinity?</div>
                 <div className="pill">What is a Sabbath?</div>
               </div>
               <p className="footer-hint">
