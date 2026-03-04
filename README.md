@@ -383,7 +383,7 @@ However, AI-generated content should **always be reviewed before publishing**, e
 
 ---
 
-# 10. Example Generated Video
+# 11. Example Generated Video
 
 Topic: *The Meaning of Advent*
 
