@@ -283,7 +283,23 @@ Check the backend console for errors related to:
 
 ---
 
-# 10. Responsible use
+# 10. Example Generated Video
+
+Topic: *The Meaning of Advent*
+
+SacredClips automatically generated the following educational short video.
+
+[Watch the generated video here](https://ghana-catholic-community-stuttgart.org/uploads/uploads/b987820034bcc212.mp4)
+
+Generated automatically using:
+
+- OpenAI GPT (script generation)
+- OpenAI Images API (scene visuals)
+- OpenAI TTS (voice narration)
+- MoviePy + FFmpeg (video rendering)
+
+---
+# 11. Responsible use
 
 SacredClips generates **AI-created educational material** about religion.
 
@@ -296,5 +312,6 @@ Before publishing videos:
 The system should be used as a **content creation assistant**, not as an authoritative source.
 
 ---
+
 
 # End of Guide

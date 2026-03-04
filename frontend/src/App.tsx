@@ -112,7 +112,7 @@ export const App: React.FC = () => {
                 SacredClips
               </div>
               <p className="subtitle">
-                Turn a religious or spiritual topic into a short vertical explainer video.
+                Turn a religious or spiritual topic into a short educational explainer video.
                 Neutral, educational, and ready for TikTok, Reels, or Shorts.
               </p>
             </div>
@@ -318,7 +318,32 @@ export const App: React.FC = () => {
 
           {loading && (
             <div className="result-block">
-              Generating script, images, and video… this depends on your machine and connection.
+              <div style={{ marginBottom: "10px", fontWeight: 600 }}>
+                Generating your video...
+              </div>
+
+              <div style={{ fontSize: "0.9rem", marginBottom: "10px" }}>
+                Creating script, images, narration, and rendering the final video.
+              </div>
+
+              <div
+                style={{
+                  width: "100%",
+                  height: "6px",
+                  background: "#e5e7eb",
+                  borderRadius: "4px",
+                  overflow: "hidden"
+                }}
+              >
+                <div
+                  style={{
+                    width: "100%",
+                    height: "100%",
+                    background: "#6366f1",
+                    animation: "loading-bar 2s linear infinite"
+                  }}
+                />
+              </div>
             </div>
           )}
         </div>

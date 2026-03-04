@@ -193,7 +193,8 @@ http://127.0.0.1:5173
 
 2. Enter a **religious or spiritual topic**, for example:
 
-- "What is Ramadan?"
+- "What is the meaning of Easter?"
+- "What is Ramadan"
 - "Meaning of Diwali in Hinduism"
 - "What is baptism?"
 - "What is the Sabbath?"
