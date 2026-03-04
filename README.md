@@ -1,143 +1,403 @@
-
 # SacredClips – AI Religious Video Generator
 
-**SacredClips** is a small full‑stack app that turns a religious or spiritual topic
-into a short vertical explainer video, ready for TikTok / Reels / Shorts.
+**SacredClips** is a full-stack AI application that turns a **religious or spiritual topic**
+into a short vertical explainer video ready for **TikTok, Instagram Reels, or YouTube Shorts**.
 
-It focuses **only on religious/spiritual topics**, and aims to be **neutral, respectful,
-and educational** – not persuasive or political.
+The system automatically generates:
 
+- a neutral educational **script**
+- **scene breakdown**
+- **voice narration**
+- **AI-generated images**
+- a fully rendered **vertical video**
 
-## Project structure
+The goal is to create **respectful, educational religious content** using modern AI tools.
+
+SacredClips focuses **only on religious and spiritual topics** and aims to remain **neutral, respectful, and educational**, avoiding persuasion or political messaging.
+
+---
+
+# Features
+
+- AI-generated educational scripts
+- Scene-based video structure
+- AI-generated images for each scene
+- AI text-to-speech narration
+- Automatic video assembly using MoviePy
+- Adjustable video duration
+- In-app **script editing & regeneration**
+- Video **preview and download**
+- Clean React UI with FastAPI backend
+
+---
+
+# Project structure
 
 ```text
-ai_video_generator_full/
+SacredClips/
 │
 ├─ app/                 # FastAPI backend
 │  ├─ main.py           # API + media serving
 │  ├─ config.py         # API key + output directory
 │  ├─ schemas.py        # Request/response models
+│  │
 │  └─ services/
 │     ├─ script_service.py  # Script generation (religious topics only)
 │     ├─ tts_service.py     # Text-to-speech (OpenAI or placeholder)
-│     ├─ image_service.py   # Image generation (OpenAI or Pillow)
-│     └─ video_service.py   # Video stitching with MoviePy
+│     ├─ image_service.py   # Image generation (OpenAI or Pillow fallback)
+│     └─ video_service.py   # Video rendering with MoviePy
 │
 ├─ frontend/            # Vite + React + TypeScript UI
 │  ├─ src/App.tsx       # Main UI: form + preview
-│  ├─ src/style.css     # Simple modern styling
+│  ├─ src/style.css     # Styling
 │  └─ ...
 │
-├─ requirements.txt     # Backend Python deps
+├─ outputs/             # Generated media files
+│  ├─ images
+│  ├─ audio
+│  └─ videos
+│
+├─ requirements.txt     # Backend Python dependencies
 └─ README.md
 ```
 
+---
 
-## 1. Backend setup (FastAPI)
+# 1. Backend setup (FastAPI)
 
 From the project root:
 
 ```bash
-cd ai_video_generator_full
+cd SacredClips
 python -m venv .venv
-# Activate the venv
-# Linux / macOS:
-source .venv/bin/activate
-# Windows PowerShell:
-# .venv\Scripts\activate
+```
 
+Activate the virtual environment:
+
+**macOS / Linux**
+
+```bash
+source .venv/bin/activate
+```
+
+**Windows (PowerShell)**
+
+```bash
+.venv\Scripts\activate
+```
+
+Install dependencies:
+
+```bash
 pip install -r requirements.txt
 ```
 
-### Configure environment variables
+---
 
-In your shell, or in PyCharm Run/Debug configuration:
+# 2. Configure environment variables
 
-```bash
-export OPENAI_API_KEY="sk-..."        # optional but recommended
-export BASE_OUTPUT_DIR="./outputs"    # optional (default: ./outputs)
+Create a `.env` file in the project root:
+
+```env
+OPENAI_API_KEY=your_openai_api_key_here
+BASE_OUTPUT_DIR=outputs
 ```
 
-Without `OPENAI_API_KEY`, the app still works, but uses placeholder
-text, silent audio, and placeholder images. This is good for debugging.
+If `OPENAI_API_KEY` is **not set**, the app still works but runs in **demo mode**:
 
-### Run the backend
+- Placeholder images
+- Silent audio
+- Basic scripts
+
+This allows you to test the pipeline without consuming API credits.
+
+---
+
+# 3. Run the backend
+
+Start the FastAPI server:
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-- API docs: http://127.0.0.1:8000/docs
-- Generated media is served from: http://127.0.0.1:8000/media/...
+Backend will run at:
 
-
-## 2. Frontend setup (React + Vite)
-
-In another terminal:
-
-```bash
-cd ai_video_generator_full/frontend
-npm install
-npm run dev
+```
+http://127.0.0.1:8000
 ```
 
-This starts the Vite dev server (e.g. http://127.0.0.1:5173).
+Useful endpoints:
 
-The frontend expects the backend at `http://localhost:8000`.
-If you change ports or host, update `API_BASE_URL` in `frontend/src/App.tsx`.
+API docs:
 
+```
+http://127.0.0.1:8000/docs
+```
 
-## 3. Using the app
+Generated media:
 
-1. Open the frontend in your browser (e.g. http://127.0.0.1:5173).
-2. Enter a **religious/spiritual topic** such as:
-   - “What is Ramadan?”
-   - “Meaning of Diwali in Hinduism”
-   - “What is baptism?”
-   - “What is the Sabbath?”
-3. Adjust style and duration if you like.
-4. Click **Generate video**.
-
-The backend will:
-
-1. Generate a neutral, respectful script and scenes (optionally using OpenAI).
-2. Generate TTS audio from the script (optionally using OpenAI TTS).
-3. Generate one image per scene (OpenAI images or placeholder).
-4. Stitch them into a vertical MP4 using MoviePy and serve it via `/media/...`.
-
-The frontend then shows:
-
-- The full script text.
-- A scene-by-scene breakdown.
-- A video player preview (you can download the video from the player).
-
-
-## 4. Where to customize
-
-- **Script behaviour**: `app/services/script_service.py`
-  - Prompts are explicitly limited to religious/spiritual topics.
-  - You can tune tone, scene count, and structure.
-- **Text-to-speech**: `app/services/tts_service.py`
-  - Swap to another provider or model.
-- **Images**: `app/services/image_service.py`
-  - Change prompts, style, or replace with stock footage lookup.
-- **Video assembly**: `app/services/video_service.py`
-  - Add transitions, subtitles, overlays, etc.
-- **Frontend UX**: `frontend/src/App.tsx`
-  - Change copy, layout, extra fields, or add login later.
-
-
-## 5. Safety notes
-
-- The backend prompts are designed to:
-  - Stay neutral and descriptive.
-  - Avoid telling viewers what they should believe.
-  - Avoid political topics entirely.
-- You should still **review each video manually** before posting to social media,
-  especially for sensitive or controversial topics.
+```
+http://127.0.0.1:8000/media/...
+```
 
 ---
 
-That’s your starter full‑stack app. You can now focus on debugging,
-styling, and expanding features (e.g. saving projects, multiple voices,
-and future topic types if you decide to go beyond religious ones).
+# 4. Frontend setup (React + Vite)
+
+Open a new terminal:
+
+```bash
+cd frontend
+```
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Run the development server:
+
+```bash
+npm run dev
+```
+
+The frontend will run at:
+
+```
+http://127.0.0.1:5173
+```
+
+The frontend expects the backend at:
+
+```
+http://localhost:8000
+```
+
+If you change the backend host or port, update:
+
+```
+frontend/src/App.tsx
+```
+
+---
+
+# 5. Using the app
+
+1. Open the frontend in your browser.
+
+```
+http://127.0.0.1:5173
+```
+
+2. Enter a **religious or spiritual topic**, for example:
+
+- "What is Ramadan?"
+- "Meaning of Diwali in Hinduism"
+- "What is baptism?"
+- "What is the Sabbath?"
+
+3. Choose a narration style.
+
+4. Select a video duration (60–90 seconds recommended).
+
+5. Click **Generate Video**.
+
+---
+
+# 6. What happens behind the scenes
+
+When a video is generated, the backend performs several steps:
+
+### 1. Script generation
+
+`script_service.py`
+
+The system generates a neutral educational script and divides it into scenes.
+
+### 2. Voice narration
+
+`tts_service.py`
+
+The script is converted into speech using OpenAI Text-to-Speech.
+
+### 3. Scene images
+
+`image_service.py`
+
+Each scene receives an AI-generated image based on keywords from the script.
+
+If AI image generation fails, a fallback placeholder is used.
+
+### 4. Video rendering
+
+`video_service.py`
+
+The system:
+
+- loads scene images
+- synchronizes them with the narration
+- assembles a vertical video using MoviePy
+- exports the final MP4
+
+### 5. Media delivery
+
+The finished video is saved in:
+
+```
+outputs/.../videos/final_video.mp4
+```
+
+and served through:
+
+```
+/media/...
+```
+
+---
+
+# 7. Editing and regenerating content
+
+SacredClips allows **manual script editing** before rendering the video.
+
+Workflow:
+
+1. Generate the initial script.
+2. Edit the script directly in the UI.
+3. Click **Regenerate Video**.
+
+The backend will:
+
+- reuse the edited script
+- regenerate images
+- regenerate narration
+- rebuild the video.
+
+This allows precise control over the final output.
+
+---
+
+# 8. Video preview and download
+
+After generation, the frontend displays:
+
+- the full script
+- scene breakdown
+- video preview
+- **download button**
+
+The video can be downloaded as an MP4 and uploaded to social platforms.
+
+---
+
+# 9. Where to customize
+
+## Script behaviour
+
+```
+app/services/script_service.py
+```
+
+Adjust:
+
+- tone
+- number of scenes
+- scene length
+- narration style
+
+---
+
+## Text-to-speech
+
+```
+app/services/tts_service.py
+```
+
+You can:
+
+- change voice models
+- switch providers
+- add multiple voices
+
+---
+
+## Image generation
+
+```
+app/services/image_service.py
+```
+
+Modify prompts or integrate:
+
+- stock images
+- diffusion models
+- custom prompt engineering
+
+---
+
+## Video rendering
+
+```
+app/services/video_service.py
+```
+
+Possible improvements:
+
+- subtitles
+- transitions
+- overlays
+- animated text
+- background music
+
+---
+
+## Frontend UX
+
+```
+frontend/src/App.tsx
+```
+
+You can add:
+
+- project history
+- user accounts
+- editing tools
+- export presets
+- direct social media posting
+
+---
+
+# 10. Safety notes
+
+SacredClips is designed to generate **neutral educational content**.
+
+The prompts aim to:
+
+- remain descriptive rather than persuasive
+- avoid political discussion
+- respect religious diversity
+
+However, AI-generated content should **always be reviewed before publishing**, especially for sensitive topics.
+
+---
+
+# Future Improvements
+
+Possible next steps for the project:
+
+- automatic subtitles
+- social media posting integrations
+- video templates
+- multiple narrator voices
+- improved scene transitions
+- project saving
+- queue-based video rendering
+- cloud deployment
+
+---
+
+# License
+
+This project is intended for educational and experimental purposes.
+Review generated content before publishing publicly.
