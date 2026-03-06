@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Literal
 from pydantic import BaseModel
 
 
@@ -37,3 +37,23 @@ class VideoResponse(BaseModel):
     script_text: str
     scenes: List[Scene]
     used_ai: bool
+
+
+class YouTubeAuthStartResponse(BaseModel):
+    auth_url: str
+
+
+class YouTubeAuthStatus(BaseModel):
+    connected: bool
+
+
+class YouTubePublishRequest(BaseModel):
+    video_path: str
+    title: str
+    description: str
+    privacy_status: Literal["private", "unlisted", "public"] = "unlisted"
+
+
+class YouTubePublishResponse(BaseModel):
+    youtube_video_id: str
+    youtube_url: str

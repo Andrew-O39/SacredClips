@@ -1,12 +1,21 @@
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import config
-from .schemas import VideoRequest, VideoResponse, ManualVideoRequest
-from .services import script_service, tts_service, image_service, video_service
+from .schemas import (
+    ManualVideoRequest,
+    VideoRequest,
+    VideoResponse,
+    YouTubeAuthStartResponse,
+    YouTubeAuthStatus,
+    YouTubePublishRequest,
+    YouTubePublishResponse,
+)
+from .services import image_service, script_service, tts_service, video_service, youtube_service
 
 app = FastAPI(title="SacredClips API")
 
@@ -122,9 +131,6 @@ def generate_video_from_script(req: ManualVideoRequest):
     - Reuse the scenes (durations & keywords) provided by the frontend.
     - Regenerate images + video.
     """
-    # Clamp duration into [60, 90] for stricter control
-    target_duration = max(60.0, min(float(req.duration_seconds), 90.0))
-
     _, audio_dir, images_dir, videos_dir = _prepare_topic_dirs(req.topic)
 
     scenes = req.scenes
@@ -165,4 +171,138 @@ def generate_video_from_script(req: ManualVideoRequest):
         script_text=req.script_text,
         scenes=scenes,
         used_ai=False,
+    )
+
+
+@app.get("/auth/youtube/start", response_model=YouTubeAuthStartResponse)
+def youtube_auth_start():
+    """
+    Start the YouTube OAuth flow.
+    Returns the Google authorization URL for the frontend to redirect the user to.
+    """
+    if not youtube_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="YouTube OAuth is not configured on the server.",
+        )
+
+    auth_url = youtube_service.create_auth_url()
+    return YouTubeAuthStartResponse(auth_url=auth_url)
+
+
+@app.get("/auth/youtube/callback", response_class=HTMLResponse)
+def youtube_auth_callback(
+    code: str | None = None,
+    error: str | None = None,
+    state: str | None = None,
+):
+    """
+    OAuth2 callback endpoint for Google / YouTube.
+    Exchanges the authorization code for tokens and stores them locally.
+    """
+    if error:
+        return HTMLResponse(
+            f"<html><body><h3>Authorization failed</h3><p>{error}</p></body></html>",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if not youtube_service.verify_state(state):
+        return HTMLResponse(
+            "<html><body><h3>Invalid or missing authorization state.</h3></body></html>",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if not code:
+        return HTMLResponse(
+            "<html><body><h3>Missing authorization code.</h3></body></html>",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        youtube_service.exchange_code_for_tokens(code)
+    except Exception as exc:  # noqa: BLE001
+        return HTMLResponse(
+            "<html><body><h3>Could not complete YouTube authorization.</h3>"
+            f"<p>{exc}</p></body></html>",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    # Simple HTML letting the user close the tab and return to the app.
+    return HTMLResponse(
+        """
+        <html>
+          <body>
+            <h3>YouTube authorization successful.</h3>
+            <p>You can close this tab and return to SacredClips.</p>
+            <script>
+              try {
+                if (window.opener && window.opener.postMessage) {
+                  window.opener.postMessage(
+                    { source: 'sacredclips', type: 'youtube-auth-complete' },
+                    '*'
+                  );
+                }
+              } catch (e) {
+                // ignore
+              }
+              // Try to close the window if it was opened as a popup
+              window.close();
+            </script>
+          </body>
+        </html>
+        """
+    )
+
+
+@app.get("/auth/youtube/status", response_model=YouTubeAuthStatus)
+def youtube_auth_status():
+    """
+    Lightweight endpoint so the frontend can know if YouTube is connected
+    with valid, usable credentials.
+    """
+    connected = youtube_service.credentials_valid()
+    return YouTubeAuthStatus(connected=connected)
+
+
+@app.post("/publish/youtube", response_model=YouTubePublishResponse)
+def publish_youtube(req: YouTubePublishRequest):
+    """
+    Upload a generated MP4 video to YouTube.
+    """
+    try:
+        video_id, url = youtube_service.upload_video(
+            video_path=req.video_path,
+            title=req.title,
+            description=req.description,
+            privacy_status=req.privacy_status,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except youtube_service.YouTubeNotConfigured as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+    except youtube_service.YouTubeNotAuthorized as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(exc),
+        ) from exc
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload video to YouTube: {exc}",
+        ) from exc
+
+    return YouTubePublishResponse(
+        youtube_video_id=video_id,
+        youtube_url=url,
     )

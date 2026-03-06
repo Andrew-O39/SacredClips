@@ -110,6 +110,23 @@ pip install -r requirements.txt
 ```
 
 ---
+## System requirements
+
+SacredClips uses MoviePy for video rendering.
+MoviePy requires FFmpeg to be installed on your system.
+
+Install FFmpeg before running the backend.
+
+macOS:
+brew install ffmpeg
+
+Ubuntu:
+sudo apt install ffmpeg
+
+Windows:
+Download from https://ffmpeg.org and add it to your PATH.
+
+---
 
 # 2. Configure environment variables
 
