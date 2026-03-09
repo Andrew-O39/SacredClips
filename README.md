@@ -6,31 +6,14 @@ into a short vertical explainer video ready for **TikTok, Instagram Reels, or Yo
 The system automatically generates:
 
 - a neutral educational **script**
-- **scene breakdown**
+- a **scene breakdown**
 - **voice narration**
 - **AI-generated images**
 - a fully rendered **vertical video**
 
-The goal is to create **respectful, educational religious content** using modern AI tools.
+It also supports **direct YouTube publishing** through OAuth 2.0 integration.
 
 SacredClips focuses **only on religious and spiritual topics** and aims to remain **neutral, respectful, and educational**, avoiding persuasion or political messaging.
-
----
-
-# Example Generated Video
-
-Topic: *The Meaning of Advent*
-
-SacredClips automatically generated the following educational short video.
-
-[Watch the generated video here](https://ghana-catholic-community-stuttgart.org/uploads/uploads/b987820034bcc212.mp4)
-
-This Video was generated automatically using:
-
-- OpenAI GPT (script generation)
-- OpenAI Images API (scene visuals)
-- OpenAI TTS (voice narration)
-- MoviePy + FFmpeg (video rendering)
 
 ---
 
@@ -44,6 +27,7 @@ This Video was generated automatically using:
 - Adjustable video duration
 - In-app **script editing & regeneration**
 - Video **preview and download**
+- Direct **YouTube upload**
 - Clean React UI with FastAPI backend
 
 ---
@@ -54,25 +38,27 @@ This Video was generated automatically using:
 SacredClips/
 │
 ├─ app/                 # FastAPI backend
-│  ├─ main.py           # API + media serving
-│  ├─ config.py         # API key + output directory
+│  ├─ main.py           # API + media serving + YouTube routes
+│  ├─ config.py         # API keys + output directory + YouTube config
 │  ├─ schemas.py        # Request/response models
 │  │
 │  └─ services/
-│     ├─ script_service.py  # Script generation (religious topics only)
-│     ├─ tts_service.py     # Text-to-speech (OpenAI or placeholder)
-│     ├─ image_service.py   # Image generation (OpenAI or Pillow fallback)
-│     └─ video_service.py   # Video rendering with MoviePy
+│     ├─ script_service.py   # Script generation (religious topics only)
+│     ├─ tts_service.py      # Text-to-speech (OpenAI or placeholder)
+│     ├─ image_service.py    # Image generation (OpenAI or Pillow fallback)
+│     ├─ video_service.py    # Video rendering with MoviePy
+│     └─ youtube_service.py  # YouTube OAuth + upload logic
 │
 ├─ frontend/            # Vite + React + TypeScript UI
-│  ├─ src/App.tsx       # Main UI: form + preview
+│  ├─ src/App.tsx       # Main UI: form + preview + YouTube publishing
 │  ├─ src/style.css     # Styling
 │  └─ ...
 │
 ├─ outputs/             # Generated media files
 │  ├─ images
 │  ├─ audio
-│  └─ videos
+│  ├─ videos
+│  └─ youtube_tokens.json
 │
 ├─ requirements.txt     # Backend Python dependencies
 └─ README.md
@@ -110,44 +96,69 @@ pip install -r requirements.txt
 ```
 
 ---
-## System requirements
 
-SacredClips uses MoviePy for video rendering.
-MoviePy requires FFmpeg to be installed on your system.
+# 2. System requirement
 
-Install FFmpeg before running the backend.
+SacredClips uses MoviePy for video rendering.  
+MoviePy requires **FFmpeg** to be installed on your system.
 
-macOS:
+**macOS**
+
+```bash
 brew install ffmpeg
+```
 
-Ubuntu:
+**Ubuntu / Debian**
+
+```bash
 sudo apt install ffmpeg
+```
 
-Windows:
-Download from https://ffmpeg.org and add it to your PATH.
+**Windows**
+
+Download FFmpeg from:
+
+```text
+https://ffmpeg.org/download.html
+```
+
+Verify installation:
+
+```bash
+ffmpeg -version
+```
 
 ---
 
-# 2. Configure environment variables
+# 3. Configure environment variables
 
 Create a `.env` file in the project root:
 
 ```env
 OPENAI_API_KEY=your_openai_api_key_here
 BASE_OUTPUT_DIR=outputs
+
+# YouTube integration
+GOOGLE_CLIENT_ID=your_google_oauth_client_id
+GOOGLE_CLIENT_SECRET=your_google_oauth_client_secret
+GOOGLE_REDIRECT_URI=http://localhost:8000/auth/youtube/callback
+
+# Optional YouTube settings
+YOUTUBE_TOKEN_PATH=outputs/youtube_tokens.json
+YOUTUBE_UPLOAD_DEFAULT_PRIVACY=unlisted
 ```
 
 If `OPENAI_API_KEY` is **not set**, the app still works but runs in **demo mode**:
 
-- Placeholder images
-- Silent audio
-- Basic scripts
+- placeholder images
+- silent audio
+- simplified script generation
 
-This allows you to test the pipeline without consuming API credits.
+This is useful for development and pipeline testing.
 
 ---
 
-# 3. Run the backend
+# 4. Run the backend
 
 Start the FastAPI server:
 
@@ -155,9 +166,9 @@ Start the FastAPI server:
 uvicorn app.main:app --reload
 ```
 
-Backend will run at:
+Backend runs at:
 
-```
+```text
 http://127.0.0.1:8000
 ```
 
@@ -165,19 +176,19 @@ Useful endpoints:
 
 API docs:
 
-```
+```text
 http://127.0.0.1:8000/docs
 ```
 
 Generated media:
 
-```
+```text
 http://127.0.0.1:8000/media/...
 ```
 
 ---
 
-# 4. Frontend setup (React + Vite)
+# 5. Frontend setup (React + Vite)
 
 Open a new terminal:
 
@@ -197,41 +208,40 @@ Run the development server:
 npm run dev
 ```
 
-The frontend will run at:
+Frontend runs at:
 
-```
+```text
 http://127.0.0.1:5173
 ```
 
 The frontend expects the backend at:
 
-```
+```text
 http://localhost:8000
 ```
 
-If you change the backend host or port, update:
+If you change the backend host or port, update `API_BASE_URL` in:
 
-```
+```text
 frontend/src/App.tsx
 ```
 
 ---
 
-# 5. Using the app
+# 6. Using the app
 
-1. Open the frontend in your browser.
+1. Open the frontend in your browser:
 
-```
+```text
 http://127.0.0.1:5173
 ```
 
 2. Enter a **religious or spiritual topic**, for example:
 
-- "What is the meaning of Easter?"
-- "What is Ramadan"
-- "Meaning of Diwali in Hinduism"
-- "What is baptism?"
-- "What is the Sabbath?"
+- "What is baptism in Christianity?"
+- "What is the Eucharist?"
+- "What is Ramadan?"
+- "What is Diwali?"
 
 3. Choose a narration style.
 
@@ -241,7 +251,7 @@ http://127.0.0.1:5173
 
 ---
 
-# 6. What happens behind the scenes
+# 7. What happens behind the scenes
 
 When a video is generated, the backend performs several steps:
 
@@ -261,9 +271,8 @@ The script is converted into speech using OpenAI Text-to-Speech.
 
 `image_service.py`
 
-Each scene receives an AI-generated image based on keywords from the script.
-
-If AI image generation fails, a fallback placeholder is used.
+Each scene receives an AI-generated image based on keywords from the script.  
+If image generation fails, a fallback placeholder is used.
 
 ### 4. Video rendering
 
@@ -272,7 +281,7 @@ If AI image generation fails, a fallback placeholder is used.
 The system:
 
 - loads scene images
-- synchronizes them with the narration
+- synchronizes them with narration
 - assembles a vertical video using MoviePy
 - exports the final MP4
 
@@ -280,19 +289,19 @@ The system:
 
 The finished video is saved in:
 
-```
+```text
 outputs/.../videos/final_video.mp4
 ```
 
 and served through:
 
-```
+```text
 /media/...
 ```
 
 ---
 
-# 7. Editing and regenerating content
+# 8. Editing and regenerating content
 
 SacredClips allows **manual script editing** before rendering the video.
 
@@ -302,35 +311,153 @@ Workflow:
 2. Edit the script directly in the UI.
 3. Click **Regenerate Video**.
 
-The backend will:
+The backend will regenerate:
 
-- reuse the edited script
-- regenerate images
-- regenerate narration
-- rebuild the video.
+- narration
+- scene images
+- the final video
 
-This allows precise control over the final output.
+using your edited script.
 
 ---
 
-# 8. Video preview and download
+# 9. Video preview and download
 
 After generation, the frontend displays:
 
 - the full script
 - scene breakdown
 - video preview
-- **download button**
+- **Download MP4** button
 
-The video can be downloaded as an MP4 and uploaded to social platforms.
+The video can be downloaded as an MP4 and uploaded manually to social platforms.
 
 ---
 
-# 9. Where to customize
+# 10. YouTube publishing
+
+SacredClips supports direct upload of generated videos to **YouTube Shorts / YouTube**.
+
+## What is required
+
+You must configure Google OAuth credentials in `.env`:
+
+```env
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+GOOGLE_REDIRECT_URI=http://localhost:8000/auth/youtube/callback
+```
+
+## YouTube setup steps
+
+### 1. Create a Google Cloud project
+Go to:
+
+```text
+https://console.cloud.google.com/
+```
+
+Create a project for SacredClips.
+
+### 2. Enable the YouTube Data API v3
+In Google Cloud Console:
+
+```text
+APIs & Services → Library → YouTube Data API v3 → Enable
+```
+
+### 3. Configure OAuth consent screen
+In Google Cloud Console:
+
+```text
+APIs & Services → OAuth consent screen
+```
+
+- Choose **External**
+- Add app name (e.g. `SacredClips`)
+- Add your email
+- Add the scope:
+
+```text
+https://www.googleapis.com/auth/youtube.upload
+```
+
+- Add your Google account under **Test users**
+
+### 4. Create OAuth client credentials
+In Google Cloud Console:
+
+```text
+APIs & Services → Credentials → Create Credentials → OAuth Client ID
+```
+
+Choose:
+
+```text
+Application type: Web application
+```
+
+Add this redirect URI exactly:
+
+```text
+http://localhost:8000/auth/youtube/callback
+```
+
+Download the OAuth JSON or copy the full **Client ID** and **Client Secret**.
+
+### 5. Update `.env`
+Copy the values into your `.env` file and restart the backend.
+
+---
+
+## How to connect YouTube
+
+1. Generate a video in SacredClips.
+2. In the YouTube Shorts panel, click **Connect YouTube**.
+3. Sign in with the Google account that owns the YouTube channel.
+4. Approve access.
+5. Return to the app and click **Refresh status** if needed.
+
+If successful, the app should show:
+
+```text
+Connected to YouTube
+```
+
+OAuth tokens are stored locally at:
+
+```text
+outputs/youtube_tokens.json
+```
+
+for development use.
+
+---
+
+## How to upload to YouTube
+
+After a video has been generated:
+
+1. Enter or edit:
+   - YouTube title
+   - YouTube description
+   - privacy status (`private`, `unlisted`, or `public`)
+2. Click **Upload to YouTube**
+3. Wait for the upload to complete
+
+The app will return a YouTube link such as:
+
+```text
+https://www.youtube.com/watch?v=VIDEO_ID
+```
+
+---
+
+# 11. Where to customize
 
 ## Script behaviour
 
-```
+```text
 app/services/script_service.py
 ```
 
@@ -341,11 +468,9 @@ Adjust:
 - scene length
 - narration style
 
----
-
 ## Text-to-speech
 
-```
+```text
 app/services/tts_service.py
 ```
 
@@ -355,11 +480,9 @@ You can:
 - switch providers
 - add multiple voices
 
----
-
 ## Image generation
 
-```
+```text
 app/services/image_service.py
 ```
 
@@ -369,11 +492,9 @@ Modify prompts or integrate:
 - diffusion models
 - custom prompt engineering
 
----
-
 ## Video rendering
 
-```
+```text
 app/services/video_service.py
 ```
 
@@ -385,11 +506,22 @@ Possible improvements:
 - animated text
 - background music
 
----
+## YouTube integration
+
+```text
+app/services/youtube_service.py
+```
+
+Possible improvements:
+
+- per-user token storage
+- multi-user OAuth connections
+- better metadata presets
+- platform-specific upload workflows
 
 ## Frontend UX
 
-```
+```text
 frontend/src/App.tsx
 ```
 
@@ -399,11 +531,12 @@ You can add:
 - user accounts
 - editing tools
 - export presets
-- direct social media posting
+- TikTok integration
+- multi-user dashboards
 
 ---
 
-# 10. Safety notes
+# 12. Safety notes
 
 SacredClips is designed to generate **neutral educational content**.
 
@@ -422,17 +555,17 @@ However, AI-generated content should **always be reviewed before publishing**, e
 Possible next steps for the project:
 
 - automatic subtitles
-- social media posting integrations
-- video templates
+- TikTok integration
+- multi-user authentication
+- cloud storage for generated assets
+- queue-based rendering
+- project saving
 - multiple narrator voices
 - improved scene transitions
-- project saving
-- queue-based video rendering
-- cloud deployment
 
 ---
 
 # License
 
-This project is intended for educational and experimental purposes.
+This project is intended for educational and experimental purposes.  
 Review generated content before publishing publicly.

@@ -9,7 +9,7 @@ SacredClips automatically creates:
 - voice narration
 - a final vertical video
 
-The video can then be previewed and downloaded for posting on platforms like **TikTok, Instagram Reels, or YouTube Shorts**.
+The video can then be previewed, downloaded, and uploaded to **YouTube** directly from the app.
 
 ---
 
@@ -28,7 +28,7 @@ uvicorn app.main:app --reload
 
 Backend runs at:
 
-```
+```text
 http://localhost:8000
 ```
 
@@ -45,7 +45,7 @@ npm run dev
 
 Frontend runs at:
 
-```
+```text
 http://localhost:5173
 ```
 
@@ -63,12 +63,12 @@ Enter a **religious or spiritual topic**.
 
 Examples:
 
+- What is baptism in Christianity?
+- What is the Eucharist?
 - What is Ramadan?
-- What is the meaning of baptism?
-- What is the Sabbath in Judaism?
-- What is Diwali in Hinduism?
+- What is Diwali?
 
-SacredClips is designed for **educational religious topics** only.
+SacredClips is designed for **educational religious topics**.
 
 ---
 
@@ -90,11 +90,9 @@ Choose the desired video length using the duration slider.
 
 Recommended range:
 
-```
+```text
 60–90 seconds
 ```
-
-Shorter videos work best for social media platforms.
 
 ---
 
@@ -102,7 +100,7 @@ Shorter videos work best for social media platforms.
 
 Click:
 
-```
+```text
 Generate Video
 ```
 
@@ -120,7 +118,7 @@ SacredClips performs several steps automatically:
 4. AI generates **voice narration**.
 5. The system combines images and narration into a **vertical video**.
 
-This process usually takes **10–40 seconds**, depending on system speed and API response time.
+This usually takes a short amount of time depending on your machine and API response times.
 
 ---
 
@@ -132,8 +130,6 @@ After generation finishes, the interface will display:
 
 The full narration script used for the video.
 
----
-
 ### Scene breakdown
 
 Each scene includes:
@@ -141,8 +137,6 @@ Each scene includes:
 - scene text
 - keywords used for image generation
 - scene duration
-
----
 
 ### Video preview
 
@@ -154,9 +148,9 @@ A built-in player allows you to watch the generated video directly in the browse
 
 Below the video preview you will find a **Download MP4** button.
 
-Click the button to download the final video file.
+Click it to download the final video file.
 
-The video can then be uploaded to platforms such as:
+The downloaded video can be uploaded manually to platforms such as:
 
 - TikTok
 - Instagram Reels
@@ -168,9 +162,9 @@ The video can then be uploaded to platforms such as:
 
 If you want to change the content of the video:
 
-1. Edit the script text in the interface.
-2. Remove or modify sections you want to change.
-3. Click **Regenerate Video**.
+1. Click **Edit script**
+2. Modify the script text
+3. Click **Regenerate video from edited script**
 
 The system will regenerate:
 
@@ -180,15 +174,102 @@ The system will regenerate:
 
 using your edited script.
 
-This allows you to refine the message or tone of the video.
+---
+
+# 7. Connecting YouTube
+
+SacredClips supports direct YouTube publishing.
+
+Before using this feature, the backend must be configured with Google OAuth credentials.
+
+## Step 1 — Configure Google OAuth
+
+Your `.env` file must contain:
+
+```env
+GOOGLE_CLIENT_ID=your_google_oauth_client_id
+GOOGLE_CLIENT_SECRET=your_google_oauth_client_secret
+GOOGLE_REDIRECT_URI=http://localhost:8000/auth/youtube/callback
+```
+
+## Step 2 — Generate a video
+
+The YouTube upload button only works after a video has been generated in the app.
+
+## Step 3 — Click “Connect YouTube”
+
+In the **YouTube Shorts** section of the UI, click:
+
+```text
+Connect YouTube
+```
+
+A Google login popup will open.
+
+## Step 4 — Sign in and approve access
+
+Sign in with the Google account connected to your YouTube channel.
+
+Approve the requested permission to upload videos.
+
+## Step 5 — Confirm connection
+
+Return to the app.
+
+If the connection succeeds, the status should change to:
+
+```text
+Connected to YouTube
+```
+
+If needed, click:
+
+```text
+Refresh status
+```
 
 ---
 
-# 7. Demo mode vs AI mode
+# 8. Uploading to YouTube
+
+Once a video has been generated and YouTube is connected:
+
+1. Review the **YouTube title**
+2. Review the **YouTube description**
+3. Choose the **privacy setting**
+   - Private
+   - Unlisted
+   - Public
+4. Click:
+
+```text
+Upload to YouTube
+```
+
+If the upload succeeds, the app will display a clickable YouTube link.
+
+---
+
+# 9. Recommended YouTube upload settings
+
+For first-time testing, use:
+
+```text
+Privacy: Unlisted
+```
+
+This lets you confirm the upload worked without making the video immediately public.
+
+You can later switch to:
+
+- `private` for drafts
+- `public` for immediate publishing
+
+---
+
+# 10. Demo mode vs AI mode
 
 SacredClips can run in two modes.
-
----
 
 ## Demo mode
 
@@ -199,8 +280,6 @@ If no OpenAI API key is configured:
 - scripts are simplified
 
 This mode is useful for development or testing.
-
----
 
 ## AI mode
 
@@ -214,17 +293,17 @@ This produces higher-quality videos.
 
 ---
 
-# 8. Where generated videos are stored
+# 11. Where generated videos are stored
 
 All generated content is saved in the project folder:
 
-```
+```text
 outputs/
 ```
 
 Inside this directory you will find:
 
-```
+```text
 outputs/
    topic_name/
       images/
@@ -234,20 +313,63 @@ outputs/
 
 The final video file is usually located at:
 
-```
+```text
 outputs/.../videos/final_video.mp4
+```
+
+YouTube OAuth tokens are stored during development at:
+
+```text
+outputs/youtube_tokens.json
 ```
 
 ---
 
-# 9. Troubleshooting
+# 12. Troubleshooting
 
-### Video preview does not play
+### YouTube says “Not connected”
 
-Make sure:
+Click:
 
-- the backend server is running
-- the frontend is connected to `localhost:8000`
+```text
+Refresh status
+```
+
+If it still shows not connected, restart the backend and try the OAuth flow again.
+
+---
+
+### YouTube authorization fails
+
+Check:
+
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `GOOGLE_REDIRECT_URI`
+
+Also confirm in Google Cloud Console that:
+
+- YouTube Data API v3 is enabled
+- your Google account is listed under **Test users**
+- the OAuth client is a **Web application**
+- the redirect URI exactly matches:
+
+```text
+http://localhost:8000/auth/youtube/callback
+```
+
+---
+
+### Upload to YouTube fails
+
+Possible causes:
+
+- no generated video in the current app state
+- YouTube not connected
+- invalid OAuth credentials
+- quota or API error
+
+Check the backend logs for the exact reason.
 
 ---
 
@@ -256,8 +378,8 @@ Make sure:
 This usually means:
 
 - OpenAI image generation failed
-- an API key is missing
-- the API request returned an error
+- API key is missing
+- image request returned an error
 
 Check backend logs for details.
 
@@ -273,16 +395,16 @@ Possible causes:
 
 ---
 
-### Video generation fails
+### Video preview does not play
 
-Check the backend console for errors related to:
+Make sure:
 
-- MoviePy
-- FFmpeg
-- OpenAI API
+- the backend server is running
+- the frontend is connected to `localhost:8000`
 
 ---
-# 10. Responsible use
+
+# 13. Responsible use
 
 SacredClips generates **AI-created educational material** about religion.
 
