@@ -1,6 +1,14 @@
 from typing import List, Literal
 from pydantic import BaseModel
 
+VisualStyle = Literal[
+    "Classical sacred art",
+    "Cinematic realism",
+    "Historical documentary",
+    "Warm candlelit painting",
+    "Minimal reverent illustration",
+]
+
 
 class Scene(BaseModel):
     index: int
@@ -14,6 +22,7 @@ class VideoRequest(BaseModel):
     style: str
     platform: str
     duration_seconds: float
+    visual_style: VisualStyle = "Classical sacred art"
 
 
 class ManualVideoRequest(BaseModel):
@@ -29,6 +38,7 @@ class ManualVideoRequest(BaseModel):
     duration_seconds: float
     script_text: str
     scenes: List[Scene]
+    visual_style: VisualStyle = "Classical sacred art"
 
 
 class VideoResponse(BaseModel):

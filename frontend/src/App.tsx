@@ -2,6 +2,17 @@ import React, { useState, useEffect } from 'react'
 
 const API_BASE_URL = 'http://localhost:8000'
 
+/** Must match backend `image_service.STYLE_PROMPT_BLOCKS` labels. */
+const VISUAL_STYLE_OPTIONS = [
+  'Classical sacred art',
+  'Cinematic realism',
+  'Historical documentary',
+  'Warm candlelit painting',
+  'Minimal reverent illustration',
+] as const
+
+type VisualStyle = typeof VISUAL_STYLE_OPTIONS[number]
+
 type Scene = {
   index: number
   text: string
@@ -35,6 +46,7 @@ export const App: React.FC = () => {
   const [style, setStyle] = useState('neutral explainer, gentle and respectful tone')
   const [platform, setPlatform] = useState('tiktok')
   const [duration, setDuration] = useState(60)
+  const [visualStyle, setVisualStyle] = useState<VisualStyle>('Classical sacred art')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<VideoResponse | null>(null)
@@ -70,6 +82,7 @@ export const App: React.FC = () => {
           style,
           platform,
           duration_seconds: duration,
+          visual_style: visualStyle,
         }),
       })
 
@@ -109,6 +122,7 @@ export const App: React.FC = () => {
           duration_seconds: duration,
           script_text: editedScript,
           scenes: result.scenes,
+          visual_style: visualStyle,
         }),
       })
 
@@ -302,6 +316,22 @@ export const App: React.FC = () => {
                 value={style}
                 onChange={e => setStyle(e.target.value)}
               />
+            </div>
+
+            <div>
+              <div className="field-label">Visual style (AI images)</div>
+              <select
+                className="select"
+                value={visualStyle}
+                onChange={e => setVisualStyle(e.target.value as VisualStyle)}
+                style={{ width: '100%' }}
+              >
+                {VISUAL_STYLE_OPTIONS.map(opt => (
+                  <option key={opt} value={opt}>
+                    {opt}
+                  </option>
+                ))}
+              </select>
             </div>
 
             <div>

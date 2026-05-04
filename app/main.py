@@ -80,15 +80,19 @@ def generate_video(req: VideoRequest):
         style=req.style,
         platform=req.platform,
         duration_seconds=target_duration,
+        visual_style=req.visual_style,
     )
     script_text, scenes, used_ai = script_service.generate_script(req_for_script)
 
     # 2) Generate images (one per scene)
     per_scene_keywords = [s.keywords for s in scenes]
+    scene_texts = [s.text for s in scenes]
     image_paths = image_service.generate_images_for_keywords(
         topic=req.topic,
         per_scene_keywords=per_scene_keywords,
         output_dir=str(images_dir),
+        visual_style=req.visual_style,
+        scene_texts=scene_texts,
     )
 
     # 3) TTS audio from script_text
@@ -137,10 +141,13 @@ def generate_video_from_script(req: ManualVideoRequest):
 
     # 1) Images from keywords
     per_scene_keywords = [s.keywords for s in scenes]
+    scene_texts = [s.text for s in scenes]
     image_paths = image_service.generate_images_for_keywords(
         topic=req.topic,
         per_scene_keywords=per_scene_keywords,
         output_dir=str(images_dir),
+        visual_style=req.visual_style,
+        scene_texts=scene_texts,
     )
 
     # 2) TTS from edited script_text
@@ -239,7 +246,7 @@ def youtube_auth_callback(
                 if (window.opener && window.opener.postMessage) {
                   window.opener.postMessage(
                     { source: 'sacredclips', type: 'youtube-auth-complete' },
-                    '*'
+                    'http://localhost:5173'
                   );
                 }
               } catch (e) {
