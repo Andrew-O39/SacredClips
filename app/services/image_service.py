@@ -158,6 +158,29 @@ def _make_single_placeholder_image(
     return str(path)
 
 
+def write_placeholder_scene_image(
+    topic: str,
+    keywords: List[str],
+    scene_index: int,
+    visual_style: str,
+    output_path: str,
+    scene_text: Optional[str] = None,
+) -> str:
+    """
+    Write one placeholder PNG for a scene at the given filesystem path (for manual uploads / fallbacks).
+    """
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    resolved = resolve_visual_style_label(visual_style)
+    return _make_single_placeholder_image(
+        topic,
+        keywords,
+        scene_index,
+        resolved,
+        Path(output_path),
+        scene_text=scene_text,
+    )
+
+
 def generate_images_for_keywords(
     topic: str,
     per_scene_keywords: List[List[str]],

@@ -1,5 +1,5 @@
-from typing import List, Literal
-from pydantic import BaseModel
+from typing import List, Literal, Optional
+from pydantic import BaseModel, Field
 
 VisualStyle = Literal[
     "Classical sacred art",
@@ -11,17 +11,19 @@ VisualStyle = Literal[
 
 
 class Scene(BaseModel):
-    index: int
-    text: str
-    keywords: List[str]
-    duration_seconds: float
+    index: int = Field(ge=1)
+    text: str = Field(min_length=1)
+    keywords: List[str] = Field(default_factory=list, max_length=10)
+    duration_seconds: float = Field(gt=0, le=120)
+    # Populated server-side after image generation — optional on requests.
+    image_url: Optional[str] = None
 
 
 class VideoRequest(BaseModel):
-    topic: str
-    style: str
-    platform: str
-    duration_seconds: float
+    topic: str = Field(min_length=1)
+    style: str = Field(min_length=1)
+    platform: str = Field(min_length=1)
+    duration_seconds: float = Field(gt=0, le=120)
     visual_style: VisualStyle = "Classical sacred art"
 
 
@@ -32,12 +34,12 @@ class ManualVideoRequest(BaseModel):
     We reuse scenes (durations & keywords) from the previous run,
     but TTS + images + video are rebuilt from the edited script_text.
     """
-    topic: str
-    style: str
-    platform: str
-    duration_seconds: float
-    script_text: str
-    scenes: List[Scene]
+    topic: str = Field(min_length=1)
+    style: str = Field(min_length=1)
+    platform: str = Field(min_length=1)
+    duration_seconds: float = Field(gt=0, le=120)
+    script_text: str = Field(min_length=1)
+    scenes: List[Scene] = Field(min_length=1)
     visual_style: VisualStyle = "Classical sacred art"
 
 
@@ -58,9 +60,9 @@ class YouTubeAuthStatus(BaseModel):
 
 
 class YouTubePublishRequest(BaseModel):
-    video_path: str
-    title: str
-    description: str
+    video_path: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    description: str = ""
     privacy_status: Literal["private", "unlisted", "public"] = "unlisted"
 
 

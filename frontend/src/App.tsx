@@ -18,6 +18,38 @@ type Scene = {
   text: string
   keywords: string[]
   duration_seconds: number
+  image_url?: string | null
+}
+
+type CreationMode = 'ai' | 'manual'
+
+function scenesForApiPayload(scenes: Scene[]): {
+  index: number
+  text: string
+  keywords: string[]
+  duration_seconds: number
+}[] {
+  return scenes.map(s => ({
+    index: s.index,
+    text: s.text,
+    keywords: s.keywords,
+    duration_seconds: s.duration_seconds,
+  }))
+}
+
+function splitScriptIntoScenes(script: string, targetTotalSeconds: number): Scene[] {
+  const trimmed = script.trim()
+  if (!trimmed) return []
+  const blocks = trimmed.split(/\n\s*\n/).map(b => b.trim()).filter(Boolean)
+  const paragraphs = blocks.length ? blocks : [trimmed.replace(/\s+/g, ' ').trim()]
+  const n = paragraphs.length
+  const per = Math.max(8, targetTotalSeconds / n)
+  return paragraphs.map((p, i) => ({
+    index: i + 1,
+    text: p.replace(/\n+/g, ' ').trim(),
+    keywords: ['manual scene', `part ${i + 1}`],
+    duration_seconds: per,
+  }))
 }
 
 type VideoResponse = {
@@ -42,11 +74,14 @@ type YouTubePublishResponse = {
 }
 
 export const App: React.FC = () => {
+  const [creationMode, setCreationMode] = useState<CreationMode>('ai')
   const [topic, setTopic] = useState('What is baptism in Christianity?')
   const [style, setStyle] = useState('neutral explainer, gentle and respectful tone')
   const [platform, setPlatform] = useState('tiktok')
   const [duration, setDuration] = useState(60)
   const [visualStyle, setVisualStyle] = useState<VisualStyle>('Classical sacred art')
+  const [editedScenes, setEditedScenes] = useState<Scene[]>([])
+  const [manualUploads, setManualUploads] = useState<Record<number, File | undefined>>({})
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<VideoResponse | null>(null)
@@ -66,8 +101,7 @@ export const App: React.FC = () => {
   const [youtubeDescription, setYoutubeDescription] = useState('')
   const [youtubePrivacy, setYoutubePrivacy] = useState<'private' | 'unlisted' | 'public'>('unlisted')
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
+  const handleAiGenerate = async () => {
     setError(null)
     setResult(null)
     setEditMode(false)
@@ -94,10 +128,12 @@ export const App: React.FC = () => {
       const data: VideoResponse = await res.json()
       setResult(data)
       setEditedScript(data.script_text)
+      setEditedScenes(data.scenes)
       setVideoVersion(prev => prev + 1) // new video
       setYoutubeTitle(topic)
       setYoutubeDescription(data.script_text)
       setYoutubeSuccessUrl(null)
+      setManualUploads({})
     } catch (err: any) {
       console.error(err)
       setError(err.message || 'Something went wrong')
@@ -106,13 +142,77 @@ export const App: React.FC = () => {
     }
   }
 
-  const handleRegenerateFromScript = async () => {
-    if (!result) return
+  const handleManualCreate = async () => {
+    if (!editedScript.trim()) {
+      setError('Paste a script (narration) for manual mode.')
+      return
+    }
+    if (!editedScenes.length) {
+      setError('Split your script into at least one scene, or edit scene cards.')
+      return
+    }
+    setError(null)
+    setResult(null)
+    setLoading(true)
+    setYoutubeError(null)
+    try {
+      const fd = new FormData()
+      fd.append('topic', topic)
+      fd.append('script_text', editedScript.trim())
+      fd.append('scenes_json', JSON.stringify(scenesForApiPayload(editedScenes)))
+      fd.append('visual_style', visualStyle)
+      fd.append('platform', platform)
+      fd.append('duration_seconds', String(duration))
+      fd.append('style', style)
+
+      for (const s of editedScenes) {
+        const file = manualUploads[s.index]
+        if (file) {
+          fd.append(`scene_upload_${s.index}`, file)
+        }
+      }
+
+      const res = await fetch(`${API_BASE_URL}/manual-video`, {
+        method: 'POST',
+        body: fd,
+      })
+
+      if (!res.ok) {
+        const text = await res.text()
+        throw new Error(text || 'Manual video request failed')
+      }
+
+      const data: VideoResponse = await res.json()
+      setResult(data)
+      setEditedScript(data.script_text)
+      setEditedScenes(data.scenes)
+      setEditMode(false)
+      setVideoVersion(prev => prev + 1)
+      setYoutubeTitle(topic)
+      setYoutubeDescription(data.script_text)
+      setYoutubeSuccessUrl(null)
+      setManualUploads({})
+    } catch (err: any) {
+      console.error(err)
+      setError(err.message || 'Something went wrong')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleFormSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (creationMode === 'ai') handleAiGenerate()
+    else handleManualCreate()
+  }
+
+  const handleRebuildFromScenes = async () => {
+    if (!result || !editedScenes.length) return
     setError(null)
     setLoading(true)
     setYoutubeError(null)
     try {
-      const res = await fetch(`${API_BASE_URL}/generate-video-from-script`, {
+      const res = await fetch(`${API_BASE_URL}/generate-video-from-scenes`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -121,7 +221,7 @@ export const App: React.FC = () => {
           platform,
           duration_seconds: duration,
           script_text: editedScript,
-          scenes: result.scenes,
+          scenes: scenesForApiPayload(editedScenes),
           visual_style: visualStyle,
         }),
       })
@@ -134,16 +234,42 @@ export const App: React.FC = () => {
       const data: VideoResponse = await res.json()
       setResult(data)
       setEditMode(false)
+      setEditedScript(data.script_text)
+      setEditedScenes(data.scenes)
       setVideoVersion(prev => prev + 1) // new video, force reload
       setYoutubeTitle(topic)
       setYoutubeDescription(data.script_text)
       setYoutubeSuccessUrl(null)
+      setManualUploads({})
     } catch (err: any) {
       console.error(err)
       setError(err.message || 'Something went wrong')
     } finally {
       setLoading(false)
     }
+  }
+
+  const handleCreationModeChange = (m: CreationMode) => {
+    setCreationMode(m)
+    setError(null)
+    if (m === 'manual' && !result) {
+      setEditedScenes(prev =>
+        prev.length
+          ? prev
+          : [
+              {
+                index: 1,
+                text: '',
+                keywords: ['manual scene'],
+                duration_seconds: Math.max(15, duration / 4),
+              },
+            ],
+      )
+    }
+  }
+
+  const updateScene = (sceneIndex: number, patch: Partial<Scene>) => {
+    setEditedScenes(prev => prev.map(sc => (sc.index === sceneIndex ? { ...sc, ...patch } : sc)))
   }
 
   const handleCopyScript = async () => {
@@ -297,7 +423,35 @@ export const App: React.FC = () => {
             </div>
           </div>
 
-          <form className="form" onSubmit={handleSubmit}>
+          <form className="form" onSubmit={handleFormSubmit}>
+            <div>
+              <div className="field-label">Creation mode</div>
+              <div className="range-row">
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                  <input
+                    type="radio"
+                    name="creation-mode"
+                    checked={creationMode === 'ai'}
+                    onChange={() => handleCreationModeChange('ai')}
+                  />
+                  AI mode
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                  <input
+                    type="radio"
+                    name="creation-mode"
+                    checked={creationMode === 'manual'}
+                    onChange={() => handleCreationModeChange('manual')}
+                  />
+                  Manual mode
+                </label>
+              </div>
+              <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
+                AI generates script and images. Manual mode uses your pasted script, optional uploads per scene,
+                TTS, and local rendering — no AI scriptwriter.
+              </p>
+            </div>
+
             <div>
               <div className="field-label">Topic (religious / spiritual)</div>
               <input
@@ -309,17 +463,51 @@ export const App: React.FC = () => {
               />
             </div>
 
-            <div>
-              <div className="field-label">Narration style</div>
-              <textarea
-                className="textarea"
-                value={style}
-                onChange={e => setStyle(e.target.value)}
-              />
-            </div>
+            {creationMode === 'ai' && (
+              <div>
+                <div className="field-label">Narration style</div>
+                <textarea
+                  className="textarea"
+                  value={style}
+                  onChange={e => setStyle(e.target.value)}
+                />
+              </div>
+            )}
+
+            {creationMode === 'manual' && !result && (
+              <div>
+                <div className="field-label">Script (narration to read aloud)</div>
+                <textarea
+                  className="textarea textarea-script-edit"
+                  value={editedScript}
+                  onChange={e => setEditedScript(e.target.value)}
+                  placeholder="Paste your full narration here..."
+                  rows={8}
+                  required={creationMode === 'manual'}
+                />
+                <div className="button-row" style={{ marginTop: '0.5rem' }}>
+                  <button
+                    type="button"
+                    className="button button-secondary"
+                    disabled={loading}
+                    onClick={() => {
+                      const next = splitScriptIntoScenes(editedScript, duration)
+                      if (!next.length) {
+                        setError('Nothing to split — paste some text first.')
+                        return
+                      }
+                      setError(null)
+                      setEditedScenes(next)
+                    }}
+                  >
+                    Split script into scenes
+                  </button>
+                </div>
+              </div>
+            )}
 
             <div>
-              <div className="field-label">Visual style (AI images)</div>
+              <div className="field-label">Visual style {creationMode === 'ai' ? '(AI images)' : '(placeholders)'}</div>
               <select
                 className="select"
                 value={visualStyle}
@@ -361,9 +549,86 @@ export const App: React.FC = () => {
               </div>
             </div>
 
+            {editedScenes.length > 0 && (creationMode === 'manual' && !result) && (
+              <div>
+                <div className="field-label">Scenes (before render)</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                  {editedScenes.map(scene => (
+                    <div key={scene.index} className="result-block">
+                      <div className="scene-title">Scene {scene.index}</div>
+                      <textarea
+                        className="textarea"
+                        rows={3}
+                        value={scene.text}
+                        onChange={e => updateScene(scene.index, { text: e.target.value })}
+                      />
+                      <div className="field-label" style={{ marginTop: '0.35rem' }}>
+                        Keywords (comma-separated)
+                      </div>
+                      <input
+                        className="input"
+                        value={scene.keywords.join(', ')}
+                        onChange={e => {
+                          const kws = e.target.value
+                            .split(',')
+                            .map(s => s.trim())
+                            .filter(Boolean)
+                          updateScene(scene.index, {
+                            keywords: kws.length ? kws : ['manual scene'],
+                          })
+                        }}
+                      />
+                      <div className="field-label" style={{ marginTop: '0.35rem' }}>
+                        Duration (seconds)
+                      </div>
+                      <input
+                        className="input"
+                        type="number"
+                        min={1}
+                        step={0.5}
+                        value={scene.duration_seconds}
+                        onChange={e =>
+                          updateScene(scene.index, {
+                            duration_seconds:
+                              Number.parseFloat(e.target.value.replace(',', '.')) || 5,
+                          })
+                        }
+                      />
+                      <div className="field-label" style={{ marginTop: '0.35rem' }}>
+                        Image (optional)
+                      </div>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={e => {
+                          const f = e.target.files?.[0]
+                          setManualUploads(prev => ({ ...prev, [scene.index]: f }))
+                        }}
+                      />
+                      {manualUploads[scene.index] && (
+                        <div style={{ marginTop: '0.5rem' }}>
+                          <img
+                            alt={`Scene ${scene.index} preview`}
+                            src={URL.createObjectURL(manualUploads[scene.index]!)}
+                            style={{ maxWidth: '100%', borderRadius: 8 }}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <button className="button" type="submit" disabled={loading}>
               <span className="button-icon">{loading ? '⏳' : '✨'}</span>
-              {loading ? 'Generating sacred clip…' : 'Generate video'}
+              {loading
+                ? creationMode === 'ai'
+                  ? 'Generating sacred clip…'
+                  : 'Building manual clip…'
+                : creationMode === 'ai'
+                  ? 'Generate video'
+                  : 'Create manual video'}
             </button>
 
             {error && <div className="error">{error}</div>}
@@ -455,11 +720,11 @@ export const App: React.FC = () => {
                     <button
                       type="button"
                       className="button button-secondary full-width"
-                      onClick={handleRegenerateFromScript}
-                      disabled={loading}
+                      onClick={handleRebuildFromScenes}
+                      disabled={loading || !result}
                     >
                       <span className="button-icon">🎬</span>
-                      {loading ? 'Regenerating…' : 'Regenerate video from edited script'}
+                      {loading ? 'Regenerating…' : 'Regenerate video (edited script + scenes)'}
                     </button>
                   </div>
                 ) : (
@@ -470,24 +735,79 @@ export const App: React.FC = () => {
               </div>
 
               <div>
-                <div className="small-label">Scenes</div>
-                <div className="result-block">
-                  <ul className="scene-list">
-                    {result.scenes.map(scene => (
-                      <li key={scene.index}>
-                        <div className="scene-title">
-                          Scene {scene.index} · {scene.duration_seconds.toFixed(1)}s
-                        </div>
-                        <div>{scene.text}</div>
-                        {scene.keywords.length > 0 && (
-                          <div className="scene-keywords">
-                            {scene.keywords.join(' · ')}
-                          </div>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
+                <div className="section-header-row">
+                  <div className="small-label">Scene editor</div>
                 </div>
+                <p className="footer-hint" style={{ marginBottom: '0.75rem' }}>
+                  Edit scene text, keywords, or durations, then regenerate with new AI images aligned to your edits.
+                  Image previews reflect the latest render.
+                </p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                  {editedScenes.map(scene => (
+                    <div key={scene.index} className="result-block">
+                      <div className="scene-title">
+                        Scene {scene.index} · {scene.duration_seconds.toFixed(1)}s
+                      </div>
+                      {scene.image_url && (
+                        <div style={{ marginBottom: '0.5rem' }}>
+                          <img
+                            alt={`Scene ${scene.index}`}
+                            src={`${API_BASE_URL}${scene.image_url}?v=${videoVersion}`}
+                            style={{ width: '100%', maxHeight: 220, objectFit: 'cover', borderRadius: 8 }}
+                          />
+                        </div>
+                      )}
+                      <textarea
+                        className="textarea"
+                        rows={4}
+                        value={scene.text}
+                        onChange={e => updateScene(scene.index, { text: e.target.value })}
+                      />
+                      <div className="field-label" style={{ marginTop: '0.35rem' }}>
+                        Keywords (comma-separated)
+                      </div>
+                      <input
+                        className="input"
+                        value={scene.keywords.join(', ')}
+                        onChange={e => {
+                          const kws = e.target.value
+                            .split(',')
+                            .map(s => s.trim())
+                            .filter(Boolean)
+                          updateScene(scene.index, {
+                            keywords: kws.length ? kws : ['scene'],
+                          })
+                        }}
+                      />
+                      <div className="field-label" style={{ marginTop: '0.35rem' }}>
+                        Duration (seconds)
+                      </div>
+                      <input
+                        className="input"
+                        type="number"
+                        min={1}
+                        step={0.5}
+                        value={scene.duration_seconds}
+                        onChange={e =>
+                          updateScene(scene.index, {
+                            duration_seconds:
+                              Number.parseFloat(e.target.value.replace(',', '.')) || 5,
+                          })
+                        }
+                      />
+                    </div>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  className="button button-secondary full-width"
+                  style={{ marginTop: '0.75rem' }}
+                  onClick={handleRebuildFromScenes}
+                  disabled={loading || !result || editedScenes.length === 0}
+                >
+                  <span className="button-icon">🎬</span>
+                  {loading ? 'Regenerating…' : 'Regenerate video from scene edits'}
+                </button>
               </div>
 
               <div>

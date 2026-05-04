@@ -78,16 +78,23 @@ def generate_script(req: VideoRequest) -> tuple[str, List[Scene], bool]:
         "script_text (string) and scenes (list of objects with keys: index, text, keywords, duration_seconds)."
     )
 
+    target = float(req.duration_seconds)
+    est_lo = max(110, int(target * 2.3))
+    est_hi = int(target * 2.85)
     user_prompt = (
         f"Create a short script about the religious or spiritual topic: '{req.topic}'.\n"
         f"Style: {req.style}.\n"
-        f"Target total duration: about {req.duration_seconds} seconds of spoken narration.\n"
+        f"Target spoken narration duration: ABOUT {target:.0f} seconds TOTAL when read aloud naturally. "
+        f"Aim for roughly {est_lo}–{est_hi} substantive words across ALL scenes combined. "
+        f"Set EACH scene duration_seconds so their SUM stays within {(target - 8):.0f}–{(target + 12):.0f} seconds "
+        "so narration timing matches viewer expectations.\n"
         "Split it into 4–6 short scenes to match vertical social-media video style.\n"
         "IMPORTANT: The scene `text` fields must be natural narration only, "
         "and must NOT include labels like 'Scene 1:' or 'Scene 2:'. "
         "Scene numbering should only appear in the JSON `index` field, not in the `text` itself.\n"
-        "Each scene text should be one or two sentences. "
-        "Estimate duration_seconds for each scene so the total is close to the requested duration. "
+        "Each scene text should be one or two sentences with enough substantive detail to comfortably fill "
+        "its duration_seconds allocation (avoid filler that will read too briefly). "
+        "Estimate duration_seconds for each scene so the total aligns with the narration target above. "
         "Focus on explaining beliefs, practices, or historical context in a neutral and respectful way. "
         "Do NOT tell the viewer what they should believe or which religion is right or wrong."
     )

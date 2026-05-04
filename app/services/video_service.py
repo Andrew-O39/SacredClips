@@ -4,8 +4,69 @@ from typing import List
 
 from moviepy import ImageClip, AudioFileClip, concatenate_videoclips
 
-MIN_DURATION = 60.0  # seconds
+MIN_DURATION = 60.0  # seconds — only enforced when **no usable narration audio**
 MAX_DURATION = 90.0  # seconds
+MIN_SCENE_CLIP = 0.25  # shortest per-scene still
+
+
+def _subclip_compat(clip, t0: float, t1: float):
+    try:
+        return clip.subclipped(t0, t1)  # MoviePy 2.x
+    except AttributeError:
+        return clip.subclip(t0, t1)     # MoviePy 1.x
+
+
+def _normalize_durations(scene_durations: List[float]) -> List[float]:
+    """Guarantee each duration is usable and sum is positive."""
+    out = [max(MIN_SCENE_CLIP, float(d)) for d in scene_durations]
+    return out
+
+
+def _scale_scene_durations_to_target(scene_durations: List[float], target: float) -> List[float]:
+    """
+    Stretch or compress segment lengths so visual montage totals `target` seconds.
+    """
+    if target <= 0 or not scene_durations:
+        return scene_durations
+    durations = _normalize_durations(scene_durations)
+    total = sum(durations)
+    if total <= 1e-6:
+        n = len(durations)
+        return [target / max(n, 1)] * max(n, 1)
+    scale = target / total
+    scaled = [max(MIN_SCENE_CLIP, d * scale) for d in durations]
+    s2 = sum(scaled)
+    if s2 <= 1e-6:
+        return scaled
+    scaled = [d * target / s2 for d in scaled]
+    # Fix float drift on last clip
+    drift = target - sum(scaled)
+    if scaled:
+        scaled[-1] = max(MIN_SCENE_CLIP, scaled[-1] + drift)
+    return scaled
+
+
+def _clips_from_images(image_paths: List[str], durations: List[float]) -> List[ImageClip]:
+    clips: List[ImageClip] = []
+    for img_path, duration in zip(image_paths, durations):
+        safe_duration = max(float(duration), MIN_SCENE_CLIP)
+        clip = ImageClip(img_path, duration=safe_duration)
+        try:
+            clip = clip.resized(height=1080)
+        except AttributeError:
+            clip = clip.resize(height=1080)
+        clips.append(clip)
+    return clips
+
+
+def _scale_durations_when_no_audio(scene_durations: List[float]) -> List[float]:
+    """Cap slideshow at MAX_DURATION; durations already reflect creative intent."""
+    durations = _normalize_durations(scene_durations)
+    total = sum(durations)
+    cap = MAX_DURATION
+    if total <= cap:
+        return durations
+    return _scale_scene_durations_to_target(durations, cap)
 
 
 def render_video(
@@ -16,116 +77,119 @@ def render_video(
     filename: str = "final_video.mp4",
 ) -> str:
     """
-    Combine images + audio into a vertical MP4.
+    Combine images + narration into a vertical MP4.
 
-    Rules:
-    - Use given scene_durations for initial layout.
-    - If audio is present, sync video length to audio where reasonable.
-    - Clamp overall length to [MIN_DURATION, MAX_DURATION]:
-        * If content would exceed MAX_DURATION, trim.
-        * If content shorter than MIN_DURATION, pad with last image (silent).
+    When **usable** narration audio is present:
+      - Stretch scene timing so the slideshow length matches narration (no silent trailing pad).
+      - Final length follows audio length (still capped by MAX_DURATION for Shorts-ish limits).
+      - Do **not** pad to MIN_DURATION with silent frames — short narration yields a shorter clip.
+
+    When audio is missing or useless (silent placeholder): keep slideshow ≤ MAX_DURATION
+    and optionally pad silent frames until MIN_DURATION (legacy offline demo behaviour).
     """
     os.makedirs(output_dir, exist_ok=True)
     output_path = str(Path(output_dir) / filename)
 
-    clips: List[ImageClip] = []
+    if len(image_paths) != len(scene_durations):
+        raise RuntimeError(
+            f"render_video: mismatched lengths images={len(image_paths)} durations={len(scene_durations)}"
+        )
 
-    for img_path, duration in zip(image_paths, scene_durations):
-        safe_duration = max(float(duration), 0.2)
-        clip = ImageClip(img_path, duration=safe_duration)
-
-        try:
-            clip = clip.resized(height=1080)  # MoviePy 2.x
-        except AttributeError:
-            clip = clip.resize(height=1080)   # MoviePy 1.x
-
-        clips.append(clip)
-
-    if not clips:
+    if not image_paths:
         raise RuntimeError("render_video: no image clips were created")
 
-    video = concatenate_videoclips(clips, method="compose")
-
-    use_audio = (
+    use_audio_filesystem = (
         audio_path
         and os.path.exists(audio_path)
         and os.path.getsize(audio_path) > 0
     )
 
-    if use_audio:
+    audio_clip = None
+    audio_duration: float | None = None
+    narration_ok = False
+
+    if use_audio_filesystem:
         try:
-            audio = AudioFileClip(audio_path)
-
-            # First clamp both to MAX_DURATION if needed
-            if video.duration > MAX_DURATION:
-                try:
-                    video = video.subclipped(0, MAX_DURATION)  # MoviePy 2.x
-                except AttributeError:
-                    video = video.subclip(0, MAX_DURATION)     # MoviePy 1.x
-
-            if audio.duration > MAX_DURATION:
-                try:
-                    audio = audio.subclipped(0, MAX_DURATION)  # MoviePy 2.x
-                except AttributeError:
-                    audio = audio.subclip(0, MAX_DURATION)     # MoviePy 1.x
-
-            # Now sync video to audio as before
-            if audio.duration > video.duration:
-                # Trim audio down to video
-                try:
-                    audio = audio.subclipped(0, video.duration)
-                except AttributeError:
-                    audio = audio.subclip(0, video.duration)
-            elif audio.duration + 0.1 < video.duration:
-                # Trim video down to audio
-                try:
-                    video = video.subclipped(0, audio.duration)
-                except AttributeError:
-                    video = video.subclip(0, audio.duration)
-
-            # Attach audio
-            try:
-                video = video.with_audio(audio)  # 2.x
-            except AttributeError:
-                video = video.set_audio(audio)   # 1.x
-
+            audio_clip = AudioFileClip(audio_path)
+            audio_duration = float(audio_clip.duration)
+            narration_ok = audio_duration >= 0.5
+            if narration_ok and audio_duration > MAX_DURATION:
+                audio_clip = _subclip_compat(audio_clip, 0, MAX_DURATION)
+                audio_duration = float(audio_clip.duration)
         except Exception as e:
-            print(f"[render_video] Could not load audio '{audio_path}': {e}")
+            narration_ok = False
+            print(f"[render_video] Could not inspect/load audio '{audio_path}': {e}")
+            if audio_clip:
+                audio_clip.close()
+                audio_clip = None
+            audio_duration = None
 
-    else:
-        # No audio: still enforce max length
-        if video.duration > MAX_DURATION:
-            try:
-                video = video.subclipped(0, MAX_DURATION)
-            except AttributeError:
-                video = video.subclip(0, MAX_DURATION)
+    if narration_ok and audio_duration is not None and audio_clip is not None:
+        target_video = audio_duration
+        scaled_durations = _scale_scene_durations_to_target(scene_durations, target_video)
 
-    # At this point, video.duration <= MAX_DURATION.
-    final = video
+        clips = _clips_from_images(image_paths, scaled_durations)
 
-    # Ensure final duration is at least MIN_DURATION by padding the last frame (silent)
-    if final.duration < MIN_DURATION:
-        pad = MIN_DURATION - final.duration
+        video = concatenate_videoclips(clips, method="compose")
+
+        vd = float(video.duration)
+        ad = float(audio_clip.duration)
+
+        tolerance = 0.12
+        try:
+            if vd > ad + tolerance:
+                video = _subclip_compat(video, 0, min(vd, ad))
+            elif ad > vd + tolerance:
+                audio_clip = _subclip_compat(audio_clip, 0, min(ad, vd))
+        except Exception as e_sync:
+            print(f"[render_video] sync trim fallback: {e_sync}")
+
+        try:
+            video = video.with_audio(audio_clip)
+        except AttributeError:
+            video = video.set_audio(audio_clip)
+
+        final = video
+
+        final.write_videofile(output_path, fps=24, codec="libx264", audio_codec="aac")
+
+        for c in clips:
+            c.close()
+        final.close()
+        if audio_clip:
+            audio_clip.close()
+        return output_path
+
+    # --- No narration: silent / placeholder slideshow (legacy behaviour with MIN pad)
+
+    durations = _scale_durations_when_no_audio(scene_durations)
+    clips = _clips_from_images(image_paths, durations)
+    video = concatenate_videoclips(clips, method="compose")
+
+    if video.duration > MAX_DURATION:
+        video = _subclip_compat(video, 0, MAX_DURATION)
+
+    final_slideshow = video
+
+    if audio_clip:
+        audio_clip.close()
+        audio_clip = None
+
+    if final_slideshow.duration < MIN_DURATION:
+        pad = MIN_DURATION - final_slideshow.duration
         last_img_path = image_paths[-1]
         pad_clip = ImageClip(last_img_path, duration=pad)
         try:
             pad_clip = pad_clip.resized(height=1080)
         except AttributeError:
             pad_clip = pad_clip.resize(height=1080)
-
-        final = concatenate_videoclips([final, pad_clip], method="compose")
+        final_slideshow = concatenate_videoclips([final_slideshow, pad_clip], method="compose")
         pad_clip.close()
 
-    final.write_videofile(
-        output_path,
-        fps=24,
-        codec="libx264",
-        audio_codec="aac",
-    )
+    final_slideshow.write_videofile(output_path, fps=24, codec="libx264", audio_codec="aac")
 
-    # Cleanup
     for c in clips:
         c.close()
-    final.close()
+    final_slideshow.close()
 
     return output_path

@@ -1,15 +1,20 @@
+import json
 from pathlib import Path
+from typing import List
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import TypeAdapter, ValidationError
 
 from . import config
 from .schemas import (
     ManualVideoRequest,
+    Scene,
     VideoRequest,
     VideoResponse,
+    VisualStyle,
     YouTubeAuthStartResponse,
     YouTubeAuthStatus,
     YouTubePublishRequest,
@@ -67,6 +72,115 @@ def _prepare_topic_dirs(topic: str) -> tuple[Path, Path, Path, Path]:
     return topic_dir, audio_dir, images_dir, videos_dir
 
 
+_visual_style_adapter = TypeAdapter(VisualStyle)
+
+
+def _normalize_visual_style(value: object) -> VisualStyle:
+    try:
+        return _visual_style_adapter.validate_python(value)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error": "Invalid visual_style", "detail": exc.errors()},
+        ) from exc
+
+
+def _sort_scenes(scenes: List[Scene]) -> List[Scene]:
+    """Stable order for pipeline: ascending scene.index."""
+    return sorted(scenes, key=lambda s: s.index)
+
+
+def _strip_scene_for_render(s: Scene) -> Scene:
+    """Forget client-side image URL hints; regenerate media URL server-side."""
+    return Scene(
+        index=s.index,
+        text=s.text,
+        keywords=s.keywords,
+        duration_seconds=s.duration_seconds,
+    )
+
+
+def _path_to_media_url(abs_img: Path) -> str:
+    rel = abs_img.resolve().relative_to(media_root)
+    return f"/media/{rel.as_posix()}"
+
+
+def _scenes_with_image_urls(scenes_ordered: List[Scene], image_paths: List[str]) -> List[Scene]:
+    combined: List[Scene] = []
+    for idx, scene in enumerate(scenes_ordered):
+        base = _strip_scene_for_render(scene)
+        img_url: str | None = None
+        if idx < len(image_paths):
+            img_url = _path_to_media_url(Path(image_paths[idx]))
+        combined.append(base.model_copy(update={"image_url": img_url}))
+    return combined
+
+
+def _finalize_video_response(
+    *,
+    topic: str,
+    script_text: str,
+    scenes_ordered: List[Scene],
+    image_paths: List[str],
+    audio_path: str,
+    videos_dir: Path,
+    used_ai_flag: bool,
+) -> VideoResponse:
+    scene_durations = [s.duration_seconds for s in scenes_ordered]
+    video_path = video_service.render_video(
+        image_paths=image_paths,
+        audio_path=audio_path,
+        scene_durations=scene_durations,
+        output_dir=str(videos_dir),
+        filename="final_video.mp4",
+    )
+    abs_video_path = Path(video_path).resolve()
+    rel_to_media = abs_video_path.relative_to(media_root)
+    video_url = f"/media/{rel_to_media.as_posix()}"
+    scenes_out = _scenes_with_image_urls(scenes_ordered, image_paths)
+    return VideoResponse(
+        video_path=str(abs_video_path),
+        video_url=video_url,
+        script_text=script_text,
+        scenes=scenes_out,
+        used_ai=used_ai_flag,
+    )
+
+
+def _regenerate_from_manual_request(req: ManualVideoRequest) -> VideoResponse:
+    """
+    Images + TTS + render from structured scenes & script_text (edited script / scenes).
+    """
+    _, audio_dir, images_dir, videos_dir = _prepare_topic_dirs(req.topic)
+    scenes_ordered = [_strip_scene_for_render(s) for s in _sort_scenes(req.scenes)]
+
+    per_scene_keywords = [s.keywords for s in scenes_ordered]
+    scene_texts = [s.text for s in scenes_ordered]
+    image_paths = image_service.generate_images_for_keywords(
+        topic=req.topic,
+        per_scene_keywords=per_scene_keywords,
+        output_dir=str(images_dir),
+        visual_style=req.visual_style,
+        scene_texts=scene_texts,
+    )
+
+    audio_path = tts_service.text_to_speech(
+        text=req.script_text,
+        output_dir=str(audio_dir),
+        filename="voiceover.mp3",
+    )
+
+    return _finalize_video_response(
+        topic=req.topic,
+        script_text=req.script_text,
+        scenes_ordered=scenes_ordered,
+        image_paths=image_paths,
+        audio_path=audio_path,
+        videos_dir=videos_dir,
+        used_ai_flag=False,
+    )
+
+
 @app.post("/generate-video", response_model=VideoResponse)
 def generate_video(req: VideoRequest):
     # Clamp requested duration into [60, 90] for stricter control
@@ -82,11 +196,12 @@ def generate_video(req: VideoRequest):
         duration_seconds=target_duration,
         visual_style=req.visual_style,
     )
-    script_text, scenes, used_ai = script_service.generate_script(req_for_script)
+    script_text, scenes_raw, used_ai = script_service.generate_script(req_for_script)
+    scenes_ordered = [_strip_scene_for_render(s) for s in _sort_scenes(scenes_raw)]
 
     # 2) Generate images (one per scene)
-    per_scene_keywords = [s.keywords for s in scenes]
-    scene_texts = [s.text for s in scenes]
+    per_scene_keywords = [s.keywords for s in scenes_ordered]
+    scene_texts = [s.text for s in scenes_ordered]
     image_paths = image_service.generate_images_for_keywords(
         topic=req.topic,
         per_scene_keywords=per_scene_keywords,
@@ -102,26 +217,14 @@ def generate_video(req: VideoRequest):
         filename="voiceover.mp3",
     )
 
-    # 4) Render video – video_service enforces [60, 90] seconds
-    scene_durations = [s.duration_seconds for s in scenes]
-    video_path = video_service.render_video(
+    return _finalize_video_response(
+        topic=req.topic,
+        script_text=script_text,
+        scenes_ordered=scenes_ordered,
         image_paths=image_paths,
         audio_path=audio_path,
-        scene_durations=scene_durations,
-        output_dir=str(videos_dir),
-        filename="final_video.mp4",
-    )
-
-    abs_video_path = Path(video_path).resolve()
-    rel_to_media = abs_video_path.relative_to(media_root)
-    video_url = f"/media/{rel_to_media.as_posix()}"
-
-    return VideoResponse(
-        video_path=str(abs_video_path),
-        video_url=video_url,
-        script_text=script_text,
-        scenes=scenes,
-        used_ai=used_ai,
+        videos_dir=videos_dir,
+        used_ai_flag=used_ai,
     )
 
 
@@ -135,49 +238,128 @@ def generate_video_from_script(req: ManualVideoRequest):
     - Reuse the scenes (durations & keywords) provided by the frontend.
     - Regenerate images + video.
     """
-    _, audio_dir, images_dir, videos_dir = _prepare_topic_dirs(req.topic)
+    return _regenerate_from_manual_request(req)
 
-    scenes = req.scenes
 
-    # 1) Images from keywords
-    per_scene_keywords = [s.keywords for s in scenes]
-    scene_texts = [s.text for s in scenes]
-    image_paths = image_service.generate_images_for_keywords(
-        topic=req.topic,
-        per_scene_keywords=per_scene_keywords,
-        output_dir=str(images_dir),
-        visual_style=req.visual_style,
-        scene_texts=scene_texts,
-    )
+@app.post("/generate-video-from-scenes", response_model=VideoResponse)
+def generate_video_from_scenes(req: ManualVideoRequest):
+    """
+    Same payload as /generate-video-from-script: rebuild from edited scene cards + script text.
+    """
+    return _regenerate_from_manual_request(req)
 
-    # 2) TTS from edited script_text
+
+@app.post("/manual-video", response_model=VideoResponse)
+async def manual_video(request: Request):
+    """
+    Local manual flow: user script + optional image uploads per scene index.
+    multipart/form-data fields:
+      - topic (str)
+      - script_text (str)
+      - scenes_json (JSON array of Scene objects without image_url required)
+      - visual_style (optional)
+      - platform (optional, ignored for now)
+      - duration_seconds (optional, ignored for render but kept for API parity)
+      - style (optional, ignored)
+    Optional file fields per scene: scene_upload_{scene.index}
+    """
+    form = await request.form()
+
+    topic = form.get("topic")
+    script_text = form.get("script_text")
+    scenes_json = form.get("scenes_json")
+    if not isinstance(topic, str) or not topic.strip():
+        raise HTTPException(status_code=400, detail="topic is required")
+    if not isinstance(script_text, str):
+        raise HTTPException(status_code=400, detail="script_text is required")
+    if not isinstance(scenes_json, str):
+        raise HTTPException(status_code=400, detail="scenes_json is required")
+
+    try:
+        raw_scenes = json.loads(scenes_json)
+        if not isinstance(raw_scenes, list) or not raw_scenes:
+            raise ValueError("scenes_json must be a non-empty array")
+        scene_models: List[Scene] = []
+        for item in raw_scenes:
+            if isinstance(item, dict):
+                item.pop("image_url", None)
+            scene_models.append(Scene.model_validate(item))
+    except (json.JSONDecodeError, ValueError, ValidationError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid scenes_json: {exc}",
+        ) from exc
+
+    vs_raw = form.get("visual_style")
+    if vs_raw is None or vs_raw == "":
+        visual_style = _normalize_visual_style("Classical sacred art")
+    else:
+        visual_style = _normalize_visual_style(vs_raw)
+
+    _, audio_dir, images_dir, videos_dir = _prepare_topic_dirs(topic)
+    scenes_ordered = [_strip_scene_for_render(s) for s in _sort_scenes(scene_models)]
+
+    allowed_ext = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    image_paths: List[str] = []
+
+    for s in scenes_ordered:
+        key = f"scene_upload_{s.index}"
+        val = form.get(key)
+        base_path = images_dir / f"scene_{s.index}_manual"
+
+        if isinstance(val, UploadFile) and val.filename:
+            suffix = Path(val.filename).suffix.lower()
+            if suffix not in allowed_ext:
+                suffix = ".png"
+            dest = Path(f"{base_path}_upload{suffix}")
+            try:
+                data = await val.read()
+            except Exception as read_exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Could not read upload for scene {s.index}: {read_exc}",
+                ) from read_exc
+            if not data:
+                dest = Path(f"{base_path}_placeholder.png")
+                image_service.write_placeholder_scene_image(
+                    topic=topic,
+                    keywords=s.keywords,
+                    scene_index=s.index,
+                    visual_style=visual_style,
+                    output_path=str(dest),
+                    scene_text=s.text,
+                )
+            else:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with open(dest, "wb") as f:
+                    f.write(data)
+            image_paths.append(str(dest.resolve()))
+        else:
+            dest = Path(f"{base_path}_placeholder.png")
+            image_service.write_placeholder_scene_image(
+                topic=topic,
+                keywords=s.keywords,
+                scene_index=s.index,
+                visual_style=visual_style,
+                output_path=str(dest),
+                scene_text=s.text,
+            )
+            image_paths.append(str(dest.resolve()))
+
     audio_path = tts_service.text_to_speech(
-        text=req.script_text,
+        text=script_text,
         output_dir=str(audio_dir),
         filename="voiceover.mp3",
     )
 
-    # 3) Video rendering – enforce [60, 90] seconds inside video_service
-    scene_durations = [s.duration_seconds for s in scenes]
-    video_path = video_service.render_video(
+    return _finalize_video_response(
+        topic=topic,
+        script_text=script_text,
+        scenes_ordered=scenes_ordered,
         image_paths=image_paths,
         audio_path=audio_path,
-        scene_durations=scene_durations,
-        output_dir=str(videos_dir),
-        filename="final_video.mp4",
-    )
-
-    abs_video_path = Path(video_path).resolve()
-    rel_to_media = abs_video_path.relative_to(media_root)
-    video_url = f"/media/{rel_to_media.as_posix()}"
-
-    # We mark used_ai=False because this script is now manual/edited
-    return VideoResponse(
-        video_path=str(abs_video_path),
-        video_url=video_url,
-        script_text=req.script_text,
-        scenes=scenes,
-        used_ai=False,
+        videos_dir=videos_dir,
+        used_ai_flag=False,
     )
 
 
