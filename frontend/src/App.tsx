@@ -22,6 +22,7 @@ type Scene = {
 }
 
 type CreationMode = 'ai' | 'manual'
+type ManualImageMode = 'upload' | 'generate' | 'placeholder'
 
 function scenesForApiPayload(scenes: Scene[]): {
   index: number
@@ -82,6 +83,7 @@ export const App: React.FC = () => {
   const [visualStyle, setVisualStyle] = useState<VisualStyle>('Classical sacred art')
   const [editedScenes, setEditedScenes] = useState<Scene[]>([])
   const [manualUploads, setManualUploads] = useState<Record<number, File | undefined>>({})
+  const [manualImageModes, setManualImageModes] = useState<Record<number, ManualImageMode>>({})
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<VideoResponse | null>(null)
@@ -137,6 +139,7 @@ export const App: React.FC = () => {
       setYoutubeDescription(data.script_text)
       setYoutubeSuccessUrl(null)
       setManualUploads({})
+      setManualImageModes({})
     } catch (err: any) {
       console.error(err)
       setError(err.message || 'Something went wrong')
@@ -170,7 +173,10 @@ export const App: React.FC = () => {
 
       for (const s of editedScenes) {
         const file = manualUploads[s.index]
+        const selectedMode = manualImageModes[s.index] ?? (file ? 'upload' : 'placeholder')
+        fd.append(`scene_image_mode_${s.index}`, selectedMode)
         if (file) {
+          // Must match backend multipart key parsed in /manual-video.
           fd.append(`scene_upload_${s.index}`, file)
         }
       }
@@ -195,6 +201,7 @@ export const App: React.FC = () => {
       setYoutubeDescription(data.script_text)
       setYoutubeSuccessUrl(null)
       setManualUploads({})
+      setManualImageModes({})
     } catch (err: any) {
       console.error(err)
       setError(err.message || 'Something went wrong')
@@ -252,6 +259,7 @@ export const App: React.FC = () => {
       setYoutubeDescription(data.script_text)
       setYoutubeSuccessUrl(null)
       setManualUploads({})
+      setManualImageModes({})
     } catch (err: any) {
       console.error(err)
       setError(err.message || 'Something went wrong')
@@ -588,8 +596,11 @@ export const App: React.FC = () => {
                         onChange={e => updateScene(scene.index, { text: e.target.value })}
                       />
                       <div className="field-label" style={{ marginTop: '0.35rem' }}>
-                        Keywords (comma-separated)
+                        Image guidance keywords
                       </div>
+                      <p className="footer-hint" style={{ marginTop: '0.25rem', marginBottom: '0.25rem' }}>
+                        Used only if you choose Generate AI image for this scene.
+                      </p>
                       <input
                         className="input"
                         value={scene.keywords.join(', ')}
@@ -620,16 +631,48 @@ export const App: React.FC = () => {
                         }
                       />
                       <div className="field-label" style={{ marginTop: '0.35rem' }}>
-                        Image (optional)
+                        Image source
                       </div>
-                      <input
-                        type="file"
-                        accept="image/*"
-                        onChange={e => {
-                          const f = e.target.files?.[0]
-                          setManualUploads(prev => ({ ...prev, [scene.index]: f }))
-                        }}
-                      />
+                      <select
+                        className="select"
+                        value={manualImageModes[scene.index] ?? (manualUploads[scene.index] ? 'upload' : 'placeholder')}
+                        onChange={e =>
+                          setManualImageModes(prev => ({
+                            ...prev,
+                            [scene.index]: e.target.value as ManualImageMode,
+                          }))
+                        }
+                        style={{ width: '100%' }}
+                      >
+                        <option value="upload">Upload image</option>
+                        <option value="generate">Generate AI image</option>
+                        <option value="placeholder">Placeholder only</option>
+                      </select>
+                      {(manualImageModes[scene.index] ?? (manualUploads[scene.index] ? 'upload' : 'placeholder')) === 'upload' && (
+                        <>
+                          <div className="field-label" style={{ marginTop: '0.35rem' }}>
+                            Upload image
+                          </div>
+                          <input
+                            type="file"
+                            accept="image/*"
+                            onChange={e => {
+                              const f = e.target.files?.[0]
+                              setManualUploads(prev => ({ ...prev, [scene.index]: f }))
+                            }}
+                          />
+                        </>
+                      )}
+                      {(manualImageModes[scene.index] ?? (manualUploads[scene.index] ? 'upload' : 'placeholder')) === 'generate' && (
+                        <p className="footer-hint" style={{ marginTop: '0.4rem' }}>
+                          AI will generate this scene image using scene text + image guidance keywords.
+                        </p>
+                      )}
+                      {(manualImageModes[scene.index] ?? (manualUploads[scene.index] ? 'upload' : 'placeholder')) === 'placeholder' && (
+                        <p className="footer-hint" style={{ marginTop: '0.4rem' }}>
+                          Placeholder will be used for this scene.
+                        </p>
+                      )}
                       {manualUploads[scene.index] && (
                         <div style={{ marginTop: '0.5rem' }}>
                           <img
@@ -831,8 +874,13 @@ export const App: React.FC = () => {
                         onChange={e => updateScene(scene.index, { text: e.target.value })}
                       />
                       <div className="field-label" style={{ marginTop: '0.35rem' }}>
-                        Keywords (comma-separated)
+                        Image guidance keywords
                       </div>
+                      <p className="footer-hint" style={{ marginTop: '0.25rem', marginBottom: '0.25rem' }}>
+                        {result?.used_ai
+                          ? 'Used to guide regenerated AI images for this scene.'
+                          : 'Used only if you choose Generate AI image for this scene.'}
+                      </p>
                       <input
                         className="input"
                         value={scene.keywords.join(', ')}

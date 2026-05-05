@@ -304,15 +304,55 @@ async def manual_video(request: Request):
 
     for s in scenes_ordered:
         key = f"scene_upload_{s.index}"
-        val = form.get(key)
+        files = form.getlist(key)
+        val = files[0] if files else None
+        is_upload = hasattr(val, "filename") and hasattr(val, "read")
+        filename = getattr(val, "filename", None) if is_upload else None
+        mode_key = f"scene_image_mode_{s.index}"
+        mode_raw = form.get(mode_key)
+        mode = mode_raw.strip().lower() if isinstance(mode_raw, str) else ""
+        if mode not in {"upload", "generate", "placeholder"}:
+            mode = "upload" if is_upload and bool(filename) else "placeholder"
+        print(
+            f"[manual-video] scene={s.index} mode={mode} "
+            f"upload_detected={is_upload} filename={filename if filename else 'NONE'}"
+        )
         base_path = images_dir / f"scene_{s.index}_manual"
 
-        if isinstance(val, UploadFile) and val.filename:
-            suffix = Path(val.filename).suffix.lower()
+        if mode == "generate":
+            ai_scene_dir = images_dir / f"scene_{s.index}_manual_ai"
+            generated = image_service.generate_images_for_keywords(
+                topic=topic,
+                per_scene_keywords=[s.keywords],
+                output_dir=str(ai_scene_dir),
+                visual_style=visual_style,
+                scene_texts=[s.text],
+            )
+            if generated:
+                dest = Path(generated[0]).resolve()
+                print(f"[manual-video] scene={s.index} using image path: {dest} (source=generate)")
+                image_paths.append(str(dest))
+                continue
+            dest = Path(f"{base_path}_placeholder.png")
+            image_service.write_placeholder_scene_image(
+                topic=topic,
+                keywords=s.keywords,
+                scene_index=s.index,
+                visual_style=visual_style,
+                output_path=str(dest),
+                scene_text=s.text,
+            )
+            print(f"[manual-video] scene={s.index} using image path: {dest.resolve()} (source=placeholder-from-generate-fallback)")
+            image_paths.append(str(dest.resolve()))
+            continue
+
+        if mode == "upload" and is_upload and filename:
+            suffix = Path(str(filename)).suffix.lower()
             if suffix not in allowed_ext:
                 suffix = ".png"
             dest = Path(f"{base_path}_upload{suffix}")
             try:
+                # val is duck-typed upload object from multipart parser.
                 data = await val.read()
             except Exception as read_exc:
                 raise HTTPException(
@@ -329,22 +369,51 @@ async def manual_video(request: Request):
                     output_path=str(dest),
                     scene_text=s.text,
                 )
+                print(
+                    f"[manual-video] scene={s.index} upload payload empty; "
+                    f"using image path: {dest.resolve()} (source=placeholder)"
+                )
             else:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 with open(dest, "wb") as f:
                     f.write(data)
+                # Verify file persisted and is not empty; otherwise fallback.
+                if not dest.exists() or dest.stat().st_size <= 0:
+                    fallback = Path(f"{base_path}_placeholder.png")
+                    image_service.write_placeholder_scene_image(
+                        topic=topic,
+                        keywords=s.keywords,
+                        scene_index=s.index,
+                        visual_style=visual_style,
+                        output_path=str(fallback),
+                        scene_text=s.text,
+                    )
+                    print(
+                        f"[manual-video] scene={s.index} upload saved empty/missing; "
+                        f"using image path: {fallback.resolve()} (source=placeholder-after-upload-check)"
+                    )
+                    dest = fallback
+                else:
+                    print(
+                        f"[manual-video] scene={s.index} upload saved; "
+                        f"using image path: {dest.resolve()} (source=upload)"
+                    )
+            # Ensure successful upload path is what enters renderer inputs.
             image_paths.append(str(dest.resolve()))
-        else:
-            dest = Path(f"{base_path}_placeholder.png")
-            image_service.write_placeholder_scene_image(
-                topic=topic,
-                keywords=s.keywords,
-                scene_index=s.index,
-                visual_style=visual_style,
-                output_path=str(dest),
-                scene_text=s.text,
-            )
-            image_paths.append(str(dest.resolve()))
+            continue
+
+        # placeholder mode or upload mode without a usable file
+        dest = Path(f"{base_path}_placeholder.png")
+        image_service.write_placeholder_scene_image(
+            topic=topic,
+            keywords=s.keywords,
+            scene_index=s.index,
+            visual_style=visual_style,
+            output_path=str(dest),
+            scene_text=s.text,
+        )
+        print(f"[manual-video] scene={s.index} using image path: {dest.resolve()} (source=placeholder)")
+        image_paths.append(str(dest.resolve()))
 
     audio_path = tts_service.text_to_speech(
         text=script_text,
