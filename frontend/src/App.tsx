@@ -100,6 +100,9 @@ export const App: React.FC = () => {
   const [youtubeTitle, setYoutubeTitle] = useState('')
   const [youtubeDescription, setYoutubeDescription] = useState('')
   const [youtubePrivacy, setYoutubePrivacy] = useState<'private' | 'unlisted' | 'public'>('unlisted')
+  const totalSceneDuration = editedScenes.reduce((acc, s) => acc + (Number.isFinite(s.duration_seconds) ? s.duration_seconds : 0), 0)
+  const durationDiff = Math.abs(totalSceneDuration - duration)
+  const hasDurationWarning = durationDiff > 10
 
   const handleAiGenerate = async () => {
     setError(null)
@@ -208,6 +211,14 @@ export const App: React.FC = () => {
 
   const handleRebuildFromScenes = async () => {
     if (!result || !editedScenes.length) return
+    const timelineScript = editedScenes
+      .map(s => s.text.trim())
+      .filter(Boolean)
+      .join('\n\n')
+    if (!timelineScript) {
+      setError('Scene text is empty. Add narration text to at least one scene before regenerating.')
+      return
+    }
     setError(null)
     setLoading(true)
     setYoutubeError(null)
@@ -220,7 +231,7 @@ export const App: React.FC = () => {
           style,
           platform,
           duration_seconds: duration,
-          script_text: editedScript,
+          script_text: timelineScript,
           scenes: scenesForApiPayload(editedScenes),
           visual_style: visualStyle,
         }),
@@ -270,6 +281,20 @@ export const App: React.FC = () => {
 
   const updateScene = (sceneIndex: number, patch: Partial<Scene>) => {
     setEditedScenes(prev => prev.map(sc => (sc.index === sceneIndex ? { ...sc, ...patch } : sc)))
+  }
+
+  const moveScene = (sceneIndex: number, direction: 'up' | 'down') => {
+    setEditedScenes(prev => {
+      const currentIdx = prev.findIndex(sc => sc.index === sceneIndex)
+      if (currentIdx < 0) return prev
+      const targetIdx = direction === 'up' ? currentIdx - 1 : currentIdx + 1
+      if (targetIdx < 0 || targetIdx >= prev.length) return prev
+
+      const copy = [...prev]
+      const [moved] = copy.splice(currentIdx, 1)
+      copy.splice(targetIdx, 0, moved)
+      return copy.map((scene, i) => ({ ...scene, index: i + 1 }))
+    })
   }
 
   const handleCopyScript = async () => {
@@ -738,23 +763,65 @@ export const App: React.FC = () => {
                 <div className="section-header-row">
                   <div className="small-label">Scene editor</div>
                 </div>
+                <p className="footer-hint" style={{ marginBottom: '0.35rem' }}>
+                  Total timeline duration: {totalSceneDuration.toFixed(1)}s · Target: {duration.toFixed(1)}s
+                </p>
+                {hasDurationWarning && (
+                  <p className="footer-hint" style={{ color: '#b45309', marginBottom: '0.6rem' }}>
+                    Timeline differs from target by more than 10s. You can still regenerate.
+                  </p>
+                )}
                 <p className="footer-hint" style={{ marginBottom: '0.75rem' }}>
                   Edit scene text, keywords, or durations, then regenerate with new AI images aligned to your edits.
                   Image previews reflect the latest render.
                 </p>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                  {editedScenes.map(scene => (
+                  {editedScenes.map((scene, listIdx) => (
                     <div key={scene.index} className="result-block">
                       <div className="scene-title">
                         Scene {scene.index} · {scene.duration_seconds.toFixed(1)}s
                       </div>
-                      {scene.image_url && (
+                      <div className="button-row" style={{ marginTop: '0.35rem', marginBottom: '0.5rem' }}>
+                        <button
+                          type="button"
+                          className="tiny-button"
+                          onClick={() => moveScene(scene.index, 'up')}
+                          disabled={listIdx === 0}
+                        >
+                          Move Up
+                        </button>
+                        <button
+                          type="button"
+                          className="tiny-button"
+                          onClick={() => moveScene(scene.index, 'down')}
+                          disabled={listIdx === editedScenes.length - 1}
+                        >
+                          Move Down
+                        </button>
+                      </div>
+                      {scene.image_url ? (
                         <div style={{ marginBottom: '0.5rem' }}>
                           <img
                             alt={`Scene ${scene.index}`}
                             src={`${API_BASE_URL}${scene.image_url}?v=${videoVersion}`}
                             style={{ width: '100%', maxHeight: 220, objectFit: 'cover', borderRadius: 8 }}
                           />
+                        </div>
+                      ) : (
+                        <div
+                          style={{
+                            marginBottom: '0.5rem',
+                            border: '1px dashed #9ca3af',
+                            borderRadius: 8,
+                            height: 120,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: '#6b7280',
+                            background: '#f9fafb',
+                          }}
+                        >
+                          No image preview yet
                         </div>
                       )}
                       <textarea
