@@ -12,6 +12,8 @@ const VISUAL_STYLE_OPTIONS = [
 ] as const
 
 type VisualStyle = typeof VISUAL_STYLE_OPTIONS[number]
+type AspectRatio = '16:9' | '9:16' | '1:1'
+type VideoType = 'normal' | 'shorts'
 
 type Scene = {
   index: number
@@ -23,6 +25,9 @@ type Scene = {
 
 type CreationMode = 'ai' | 'manual'
 type ManualImageMode = 'upload' | 'generate' | 'placeholder'
+type ManualNarrationSource = 'tts' | 'upload'
+type GenerationProfile = 'ai' | 'manual_tts' | 'manual_upload' | 'regenerate'
+type ImageFitMode = 'fit' | 'fill'
 
 function scenesForApiPayload(scenes: Scene[]): {
   index: number
@@ -38,6 +43,27 @@ function scenesForApiPayload(scenes: Scene[]): {
   }))
 }
 
+function sanitizeScenesForPayload(scenes: Scene[]): {
+  index: number
+  text: string
+  keywords: string[]
+  duration_seconds: number
+}[] {
+  return scenes.map(s => {
+    const safeText = s.text.trim() || `Manual visual scene ${s.index}`
+    const safeKeywords = (s.keywords || []).map(k => k.trim()).filter(Boolean)
+    const safeDuration = Number.isFinite(s.duration_seconds) && s.duration_seconds > 0
+      ? s.duration_seconds
+      : 10
+    return {
+      index: s.index,
+      text: safeText,
+      keywords: safeKeywords.length ? safeKeywords : ['manual scene'],
+      duration_seconds: safeDuration,
+    }
+  })
+}
+
 function splitScriptIntoScenes(script: string, targetTotalSeconds: number): Scene[] {
   const trimmed = script.trim()
   if (!trimmed) return []
@@ -51,6 +77,10 @@ function splitScriptIntoScenes(script: string, targetTotalSeconds: number): Scen
     keywords: ['manual scene', `part ${i + 1}`],
     duration_seconds: per,
   }))
+}
+
+function reindexScenes(scenes: Scene[]): Scene[] {
+  return scenes.map((scene, i) => ({ ...scene, index: i + 1 }))
 }
 
 type VideoResponse = {
@@ -76,14 +106,18 @@ type YouTubePublishResponse = {
 
 export const App: React.FC = () => {
   const [creationMode, setCreationMode] = useState<CreationMode>('ai')
+  const [videoType, setVideoType] = useState<VideoType>('normal')
   const [topic, setTopic] = useState('What is baptism in Christianity?')
   const [style, setStyle] = useState('neutral explainer, gentle and respectful tone')
-  const [platform, setPlatform] = useState('tiktok')
-  const [duration, setDuration] = useState(60)
+  const [aspectRatio, setAspectRatio] = useState<AspectRatio>('16:9')
+  const [duration, setDuration] = useState(180)
   const [visualStyle, setVisualStyle] = useState<VisualStyle>('Classical sacred art')
+  const [imageFitMode, setImageFitMode] = useState<ImageFitMode>('fit')
   const [editedScenes, setEditedScenes] = useState<Scene[]>([])
   const [manualUploads, setManualUploads] = useState<Record<number, File | undefined>>({})
   const [manualImageModes, setManualImageModes] = useState<Record<number, ManualImageMode>>({})
+  const [manualNarrationSource, setManualNarrationSource] = useState<ManualNarrationSource>('tts')
+  const [manualAudioUpload, setManualAudioUpload] = useState<File | undefined>(undefined)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<VideoResponse | null>(null)
@@ -102,16 +136,53 @@ export const App: React.FC = () => {
   const [youtubeTitle, setYoutubeTitle] = useState('')
   const [youtubeDescription, setYoutubeDescription] = useState('')
   const [youtubePrivacy, setYoutubePrivacy] = useState<'private' | 'unlisted' | 'public'>('unlisted')
+  const [generationStage, setGenerationStage] = useState('Idle')
+  const [generationProgress, setGenerationProgress] = useState(0)
+  const [generationProfile, setGenerationProfile] = useState<GenerationProfile>('ai')
   const totalSceneDuration = editedScenes.reduce((acc, s) => acc + (Number.isFinite(s.duration_seconds) ? s.duration_seconds : 0), 0)
   const durationDiff = Math.abs(totalSceneDuration - duration)
   const hasDurationWarning = durationDiff > 10
+  const durationMin = videoType === 'normal' ? 120 : 60
+  const durationMax = videoType === 'normal' ? 600 : 90
+  const durationStep = videoType === 'normal' ? 30 : 5
+
+  const beginGenerationProgress = (profile: GenerationProfile) => {
+    setGenerationProfile(profile)
+    setGenerationStage('Preparing request')
+    setGenerationProgress(5)
+  }
+
+  const finishGenerationProgress = async () => {
+    setGenerationStage('Complete')
+    setGenerationProgress(100)
+    await new Promise(resolve => setTimeout(resolve, 250))
+  }
+
+  const resetToNewVideo = () => {
+    setResult(null)
+    setEditedScript('')
+    setEditedScenes([])
+    setManualUploads({})
+    setManualImageModes({})
+    setManualAudioUpload(undefined)
+    setVideoVersion(0)
+    setYoutubeSuccessUrl(null)
+    setYoutubeError(null)
+    setError(null)
+    setEditMode(false)
+    setLoading(false)
+    setGenerationStage('Idle')
+    setGenerationProgress(0)
+  }
 
   const handleAiGenerate = async () => {
+    beginGenerationProgress('ai')
     setError(null)
     setResult(null)
     setEditMode(false)
     setLoading(true)
     setYoutubeError(null)
+    setYoutubeSuccessUrl(null)
     try {
       const res = await fetch(`${API_BASE_URL}/generate-video`, {
         method: 'POST',
@@ -119,9 +190,10 @@ export const App: React.FC = () => {
         body: JSON.stringify({
           topic,
           style,
-          platform,
           duration_seconds: duration,
           visual_style: visualStyle,
+          aspect_ratio: aspectRatio,
+          image_fit_mode: imageFitMode,
         }),
       })
 
@@ -131,6 +203,7 @@ export const App: React.FC = () => {
       }
 
       const data: VideoResponse = await res.json()
+      await finishGenerationProgress()
       setResult(data)
       setEditedScript(data.script_text)
       setEditedScenes(data.scenes)
@@ -149,8 +222,12 @@ export const App: React.FC = () => {
   }
 
   const handleManualCreate = async () => {
-    if (!editedScript.trim()) {
+    if (manualNarrationSource === 'tts' && !editedScript.trim()) {
       setError('Paste a script (narration) for manual mode.')
+      return
+    }
+    if (manualNarrationSource === 'upload' && !manualAudioUpload) {
+      setError('Select an audio file for uploaded narration mode.')
       return
     }
     if (!editedScenes.length) {
@@ -159,17 +236,33 @@ export const App: React.FC = () => {
     }
     setError(null)
     setResult(null)
+    beginGenerationProgress(manualNarrationSource === 'upload' ? 'manual_upload' : 'manual_tts')
     setLoading(true)
     setYoutubeError(null)
+    setYoutubeSuccessUrl(null)
     try {
+      const fallbackTimelineScript = editedScenes
+        .map(s => s.text.trim())
+        .filter(Boolean)
+        .join('\n\n')
+      const effectiveScriptText = editedScript.trim()
+        || fallbackTimelineScript
+        || 'Manual video with uploaded narration.'
+      const safeScenesPayload = sanitizeScenesForPayload(editedScenes)
+
       const fd = new FormData()
       fd.append('topic', topic)
-      fd.append('script_text', editedScript.trim())
-      fd.append('scenes_json', JSON.stringify(scenesForApiPayload(editedScenes)))
+      fd.append('script_text', effectiveScriptText)
+      fd.append('scenes_json', JSON.stringify(safeScenesPayload))
       fd.append('visual_style', visualStyle)
-      fd.append('platform', platform)
       fd.append('duration_seconds', String(duration))
       fd.append('style', style)
+      fd.append('aspect_ratio', aspectRatio)
+      fd.append('image_fit_mode', imageFitMode)
+      fd.append('narration_source', manualNarrationSource)
+      if (manualNarrationSource === 'upload' && manualAudioUpload) {
+        fd.append('audio_upload', manualAudioUpload)
+      }
 
       for (const s of editedScenes) {
         const file = manualUploads[s.index]
@@ -192,6 +285,7 @@ export const App: React.FC = () => {
       }
 
       const data: VideoResponse = await res.json()
+      await finishGenerationProgress()
       setResult(data)
       setEditedScript(data.script_text)
       setEditedScenes(data.scenes)
@@ -202,6 +296,7 @@ export const App: React.FC = () => {
       setYoutubeSuccessUrl(null)
       setManualUploads({})
       setManualImageModes({})
+      setManualAudioUpload(undefined)
     } catch (err: any) {
       console.error(err)
       setError(err.message || 'Something went wrong')
@@ -227,8 +322,10 @@ export const App: React.FC = () => {
       return
     }
     setError(null)
+    beginGenerationProgress('regenerate')
     setLoading(true)
     setYoutubeError(null)
+    setYoutubeSuccessUrl(null)
     try {
       const res = await fetch(`${API_BASE_URL}/generate-video-from-scenes`, {
         method: 'POST',
@@ -236,11 +333,12 @@ export const App: React.FC = () => {
         body: JSON.stringify({
           topic,
           style,
-          platform,
           duration_seconds: duration,
           script_text: timelineScript,
           scenes: scenesForApiPayload(editedScenes),
           visual_style: visualStyle,
+          aspect_ratio: aspectRatio,
+          image_fit_mode: imageFitMode,
         }),
       })
 
@@ -250,6 +348,7 @@ export const App: React.FC = () => {
       }
 
       const data: VideoResponse = await res.json()
+      await finishGenerationProgress()
       setResult(data)
       setEditMode(false)
       setEditedScript(data.script_text)
@@ -287,8 +386,82 @@ export const App: React.FC = () => {
     }
   }
 
+  const handleVideoTypeChange = (nextType: VideoType) => {
+    setVideoType(nextType)
+    if (nextType === 'normal') {
+      setAspectRatio('16:9')
+      setImageFitMode('fit')
+      setDuration(prev => (prev < 120 || prev > 600 ? 180 : prev))
+    } else {
+      setAspectRatio('9:16')
+      setImageFitMode('fill')
+      setDuration(prev => (prev < 60 || prev > 90 ? 60 : prev))
+    }
+  }
+
   const updateScene = (sceneIndex: number, patch: Partial<Scene>) => {
     setEditedScenes(prev => prev.map(sc => (sc.index === sceneIndex ? { ...sc, ...patch } : sc)))
+  }
+
+  const addManualScene = () => {
+    const base = reindexScenes(editedScenes)
+    setEditedScenes([
+      ...base,
+      {
+        index: base.length + 1,
+        text: 'Manual visual scene',
+        keywords: ['manual scene'],
+        duration_seconds: 10,
+        image_url: null,
+      },
+    ])
+  }
+
+  const removeManualScene = (sceneIndex: number) => {
+    if (editedScenes.length <= 1) return
+    const filteredOld = editedScenes.filter(s => s.index !== sceneIndex)
+    const reindexed = reindexScenes(filteredOld)
+    const indexMap = new Map<number, number>()
+    filteredOld.forEach((scene, i) => indexMap.set(scene.index, reindexed[i].index))
+    const nextUploads: Record<number, File | undefined> = {}
+    const nextModes: Record<number, ManualImageMode> = {}
+    indexMap.forEach((newIdx, oldIdx) => {
+      if (manualUploads[oldIdx]) nextUploads[newIdx] = manualUploads[oldIdx]
+      if (manualImageModes[oldIdx]) nextModes[newIdx] = manualImageModes[oldIdx]
+    })
+    setEditedScenes(reindexed)
+    setManualUploads(nextUploads)
+    setManualImageModes(nextModes)
+  }
+
+  const duplicateManualScene = (sceneIndex: number) => {
+    const idx = editedScenes.findIndex(s => s.index === sceneIndex)
+    if (idx < 0) return
+    const source = editedScenes[idx]
+    const duplicate: Scene = {
+      ...source,
+      image_url: null,
+    }
+    const nextRaw = [...editedScenes]
+    nextRaw.splice(idx + 1, 0, duplicate)
+    const reindexed = reindexScenes(nextRaw)
+    const indexMap = new Map<number, number>()
+    editedScenes.forEach((scene, i) => {
+      const newPos = i <= idx ? i : i + 1
+      indexMap.set(scene.index, reindexed[newPos].index)
+    })
+    const nextUploads: Record<number, File | undefined> = {}
+    const nextModes: Record<number, ManualImageMode> = {}
+    indexMap.forEach((newIdx, oldIdx) => {
+      if (manualUploads[oldIdx]) nextUploads[newIdx] = manualUploads[oldIdx]
+      if (manualImageModes[oldIdx]) nextModes[newIdx] = manualImageModes[oldIdx]
+    })
+    // For duplicated scene: keep same image mode if available, but no uploaded file.
+    const sourceMode = manualImageModes[source.index]
+    if (sourceMode) nextModes[reindexed[idx + 1].index] = sourceMode
+    setEditedScenes(reindexed)
+    setManualUploads(nextUploads)
+    setManualImageModes(nextModes)
   }
 
   const moveScene = (sceneIndex: number, direction: 'up' | 'down') => {
@@ -438,6 +611,55 @@ export const App: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  useEffect(() => {
+    if (!loading) return
+
+    const stagePlanByProfile: Record<GenerationProfile, { threshold: number; label: string }[]> = {
+      ai: [
+        { threshold: 15, label: 'Preparing request' },
+        { threshold: 35, label: 'Generating script' },
+        { threshold: 65, label: 'Creating visuals' },
+        { threshold: 80, label: 'Generating narration' },
+        { threshold: 95, label: 'Rendering video' },
+      ],
+      regenerate: [
+        { threshold: 15, label: 'Preparing request' },
+        { threshold: 40, label: 'Creating visuals' },
+        { threshold: 70, label: 'Generating narration' },
+        { threshold: 95, label: 'Rendering video' },
+      ],
+      manual_tts: [
+        { threshold: 15, label: 'Preparing request' },
+        { threshold: 35, label: 'Processing uploads' },
+        { threshold: 65, label: 'Creating/collecting visuals' },
+        { threshold: 80, label: 'Generating narration' },
+        { threshold: 95, label: 'Rendering video' },
+      ],
+      manual_upload: [
+        { threshold: 20, label: 'Preparing request' },
+        { threshold: 45, label: 'Processing uploads' },
+        { threshold: 75, label: 'Creating/collecting visuals' },
+        { threshold: 92, label: 'Rendering video' },
+        { threshold: 95, label: 'Finalizing video' },
+      ],
+    }
+
+    const stagePlan = stagePlanByProfile[generationProfile]
+
+    const id = window.setInterval(() => {
+      setGenerationProgress(prev => {
+        if (prev >= 95) return prev
+        const delta = prev < 25 ? 2 : prev < 60 ? 1.4 : prev < 85 ? 0.9 : 0.45
+        const next = Math.min(95, prev + delta)
+        const stage = stagePlan.find(step => next <= step.threshold)?.label ?? 'Rendering video'
+        setGenerationStage(stage)
+        return next
+      })
+    }, 650)
+
+    return () => window.clearInterval(id)
+  }, [loading, generationProfile])
+
   return (
     <div className="app-root">
       <div className="card">
@@ -516,7 +738,7 @@ export const App: React.FC = () => {
                   onChange={e => setEditedScript(e.target.value)}
                   placeholder="Paste your full narration here..."
                   rows={8}
-                  required={creationMode === 'manual'}
+                  required={creationMode === 'manual' && manualNarrationSource === 'tts'}
                 />
                 <div className="button-row" style={{ marginTop: '0.5rem' }}>
                   <button
@@ -535,7 +757,51 @@ export const App: React.FC = () => {
                   >
                     Split script into scenes
                   </button>
+                  <button
+                    type="button"
+                    className="button button-secondary"
+                    disabled={loading}
+                    onClick={addManualScene}
+                  >
+                    Add scene
+                  </button>
                 </div>
+                <div className="field-label" style={{ marginTop: '0.75rem' }}>
+                  Narration source
+                </div>
+                <div className="range-row">
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                    <input
+                      type="radio"
+                      name="manual-narration-source"
+                      checked={manualNarrationSource === 'tts'}
+                      onChange={() => setManualNarrationSource('tts')}
+                    />
+                    Generate AI voice from script
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                    <input
+                      type="radio"
+                      name="manual-narration-source"
+                      checked={manualNarrationSource === 'upload'}
+                      onChange={() => setManualNarrationSource('upload')}
+                    />
+                    Upload my own audio
+                  </label>
+                </div>
+                {manualNarrationSource === 'upload' && (
+                  <div style={{ marginTop: '0.5rem' }}>
+                    <div className="field-label">Narration audio file</div>
+                    <input
+                      type="file"
+                      accept="audio/*"
+                      onChange={e => setManualAudioUpload(e.target.files?.[0])}
+                    />
+                    <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
+                      Uploaded narration will be used as the video audio track (TTS is skipped).
+                    </p>
+                  </div>
+                )}
               </div>
             )}
 
@@ -556,23 +822,53 @@ export const App: React.FC = () => {
             </div>
 
             <div>
-              <div className="field-label">Target duration (60–90 seconds)</div>
+              <div className="field-label">Content format</div>
+              <select
+                className="select"
+                value={videoType}
+                onChange={e => handleVideoTypeChange(e.target.value as VideoType)}
+                style={{ width: '100%' }}
+              >
+                <option value="normal">Normal YouTube video (16:9 horizontal)</option>
+                <option value="shorts">Shorts / TikTok / Reels (9:16 vertical)</option>
+              </select>
+              <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
+                {videoType === 'normal'
+                  ? 'Output format: 16:9 horizontal'
+                  : 'Output format: 9:16 vertical'}
+              </p>
+            </div>
+
+            <div>
+              <div className="field-label">Image fit</div>
+              <select
+                className="select"
+                value={imageFitMode}
+                onChange={e => setImageFitMode(e.target.value as ImageFitMode)}
+                style={{ width: '100%' }}
+              >
+                <option value="fit">Fit full image</option>
+                <option value="fill">Fill screen / crop</option>
+              </select>
+              <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
+                Fit full image: keeps the whole image visible, may add padding.
+              </p>
+              <p className="footer-hint" style={{ marginTop: '0.2rem' }}>
+                Fill screen / crop: fills the frame, may crop image edges.
+              </p>
+            </div>
+
+            <div>
+              <div className="field-label">
+                Desired video length ({durationMin}s–{durationMax}s)
+              </div>
               <div className="range-row">
-                <select
-                  className="select"
-                  value={platform}
-                  onChange={e => setPlatform(e.target.value)}
-                >
-                  <option value="tiktok">TikTok</option>
-                  <option value="instagram">Instagram Reels</option>
-                  <option value="youtube_shorts">YouTube Shorts</option>
-                </select>
                 <div className="range-input">
                   <input
                     type="range"
-                    min={60}
-                    max={90}
-                    step={5}
+                    min={durationMin}
+                    max={durationMax}
+                    step={durationStep}
                     value={duration}
                     onChange={e => setDuration(Number(e.target.value))}
                     style={{ width: '100%' }}
@@ -589,6 +885,23 @@ export const App: React.FC = () => {
                   {editedScenes.map(scene => (
                     <div key={scene.index} className="result-block">
                       <div className="scene-title">Scene {scene.index}</div>
+                      <div className="button-row" style={{ marginBottom: '0.5rem' }}>
+                        <button
+                          type="button"
+                          className="tiny-button"
+                          onClick={() => duplicateManualScene(scene.index)}
+                        >
+                          Duplicate scene
+                        </button>
+                        <button
+                          type="button"
+                          className="tiny-button"
+                          onClick={() => removeManualScene(scene.index)}
+                          disabled={editedScenes.length <= 1}
+                        >
+                          Remove scene
+                        </button>
+                      </div>
                       <textarea
                         className="textarea"
                         rows={3}
@@ -715,6 +1028,40 @@ export const App: React.FC = () => {
             </div>
             <div className="status-dot" />
           </div>
+
+          {loading && (
+            <div className="result-block">
+              <div style={{ marginBottom: '10px', fontWeight: 600 }}>
+                {generationStage || 'Generating your video...'}
+              </div>
+
+              <div style={{ fontSize: '0.9rem', marginBottom: '10px' }}>
+                Estimated progress: {Math.floor(generationProgress)}%
+              </div>
+
+              <div
+                style={{
+                  width: '100%',
+                  height: '8px',
+                  background: '#e5e7eb',
+                  borderRadius: '4px',
+                  overflow: 'hidden',
+                }}
+              >
+                <div
+                  style={{
+                    width: `${Math.max(5, Math.floor(generationProgress))}%`,
+                    height: '100%',
+                    background: '#6366f1',
+                    transition: 'width 0.5s ease',
+                  }}
+                />
+              </div>
+              <p className="footer-hint" style={{ marginTop: '0.6rem' }}>
+                This is an estimated progress indicator. Final rendering may take longer for longer videos.
+              </p>
+            </div>
+          )}
 
           {result && (
             <div
@@ -946,6 +1293,13 @@ export const App: React.FC = () => {
                     <span className="button-icon">⬇️</span>
                     Download MP4
                   </a>
+                  <button
+                    type="button"
+                    className="button button-secondary"
+                    onClick={resetToNewVideo}
+                  >
+                    Start new video
+                  </button>
                 </div>
 
                 <p className="footer-hint">
@@ -1045,36 +1399,6 @@ export const App: React.FC = () => {
             </>
           )}
 
-          {loading && (
-            <div className="result-block">
-              <div style={{ marginBottom: "10px", fontWeight: 600 }}>
-                Generating your video...
-              </div>
-
-              <div style={{ fontSize: "0.9rem", marginBottom: "10px" }}>
-                Creating script, images, narration, and rendering the final video.
-              </div>
-
-              <div
-                style={{
-                  width: "100%",
-                  height: "6px",
-                  background: "#e5e7eb",
-                  borderRadius: "4px",
-                  overflow: "hidden"
-                }}
-              >
-                <div
-                  style={{
-                    width: "100%",
-                    height: "100%",
-                    background: "#6366f1",
-                    animation: "loading-bar 2s linear infinite"
-                  }}
-                />
-              </div>
-            </div>
-          )}
         </div>
       </div>
     </div>

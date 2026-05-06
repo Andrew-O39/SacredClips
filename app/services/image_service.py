@@ -13,6 +13,19 @@ except ImportError:
 
 # Default and allowed visual styles (must match frontend options)
 DEFAULT_VISUAL_STYLE = "Classical sacred art"
+DEFAULT_ASPECT_RATIO = "16:9"
+
+ASPECT_IMAGE_SIZE: dict[str, str] = {
+    "9:16": "1024x1536",
+    "16:9": "1536x1024",
+    "1:1": "1024x1024",
+}
+
+ASPECT_IMAGE_LABEL: dict[str, str] = {
+    "9:16": "vertical 9:16",
+    "16:9": "horizontal 16:9",
+    "1:1": "square 1:1",
+}
 
 STYLE_PROMPT_BLOCKS: dict[str, str] = {
     "Classical sacred art": (
@@ -76,6 +89,7 @@ def build_image_prompt(
     keywords: List[str],
     scene_index: int,
     visual_style: str = DEFAULT_VISUAL_STYLE,
+    aspect_ratio: str = DEFAULT_ASPECT_RATIO,
     scene_text: Optional[str] = None,
 ) -> str:
     """
@@ -94,8 +108,10 @@ def build_image_prompt(
             excerpt = excerpt[:597] + "..."
         scene_part = f" Narration context for this moment (describe mood and setting, do not paint text): {excerpt}"
 
+    orientation = ASPECT_IMAGE_LABEL.get(aspect_ratio, ASPECT_IMAGE_LABEL[DEFAULT_ASPECT_RATIO])
+
     return (
-        f"Vertical 9:16 image for scene {scene_index} of an educational short video about: '{topic}'. "
+        f"{orientation.capitalize()} image for scene {scene_index} of an educational video about: '{topic}'. "
         f"Mood & subject cues: {kw_part}.{scene_part} "
         f"{style_block} "
         f"Lighting: soft, warm, natural or candlelit where fitting; gentle shadows; contemplative air. "
@@ -110,6 +126,7 @@ def _make_single_placeholder_image(
     keywords: List[str],
     scene_index: int,
     visual_style: str,
+    aspect_ratio: str,
     path: Path,
     scene_text: Optional[str] = None,
 ) -> str:
@@ -122,13 +139,20 @@ def _make_single_placeholder_image(
     os.makedirs(path.parent, exist_ok=True)
 
     base_color = 40 + (scene_index * 15) % 80
-    img = Image.new("RGB", (1080, 1920), color=(base_color, base_color, 90))
+    if aspect_ratio == "9:16":
+        size = (1080, 1920)
+    elif aspect_ratio == "1:1":
+        size = (1080, 1080)
+    else:
+        size = (1920, 1080)
+    img = Image.new("RGB", size, color=(base_color, base_color, 90))
     draw = ImageDraw.Draw(img)
 
     resolved = resolve_visual_style_label(visual_style)
     lines: List[str] = [
         f"Scene {scene_index}",
         f"Topic: {topic}",
+        f"Aspect ratio: {aspect_ratio}",
         f"Visual style: {resolved}",
     ]
     if keywords:
@@ -163,6 +187,7 @@ def write_placeholder_scene_image(
     keywords: List[str],
     scene_index: int,
     visual_style: str,
+    aspect_ratio: str,
     output_path: str,
     scene_text: Optional[str] = None,
 ) -> str:
@@ -176,6 +201,7 @@ def write_placeholder_scene_image(
         keywords,
         scene_index,
         resolved,
+        aspect_ratio,
         Path(output_path),
         scene_text=scene_text,
     )
@@ -186,6 +212,7 @@ def generate_images_for_keywords(
     per_scene_keywords: List[List[str]],
     output_dir: str,
     visual_style: str = DEFAULT_VISUAL_STYLE,
+    aspect_ratio: str = DEFAULT_ASPECT_RATIO,
     scene_texts: Optional[List[str]] = None,
 ) -> List[str]:
     """
@@ -223,7 +250,7 @@ def generate_images_for_keywords(
             )
             image_paths.append(
                 _make_single_placeholder_image(
-                    topic, keywords, idx, resolved_style, img_path, scene_text=scene_text
+                    topic, keywords, idx, resolved_style, aspect_ratio, img_path, scene_text=scene_text
                 )
             )
             continue
@@ -233,14 +260,16 @@ def generate_images_for_keywords(
             keywords=keywords,
             scene_index=idx,
             visual_style=resolved_style,
+            aspect_ratio=aspect_ratio,
             scene_text=scene_text,
         )
 
         try:
+            size = ASPECT_IMAGE_SIZE.get(aspect_ratio, ASPECT_IMAGE_SIZE[DEFAULT_ASPECT_RATIO])
             result = client.images.generate(
                 model="gpt-image-1",
                 prompt=prompt,
-                size="1024x1536",
+                size=size,
             )
 
             img_b64 = result.data[0].b64_json
@@ -255,7 +284,7 @@ def generate_images_for_keywords(
             print(f"[image_service] OpenAI image error for scene {idx}, using placeholder: {e}")
             image_paths.append(
                 _make_single_placeholder_image(
-                    topic, keywords, idx, resolved_style, img_path, scene_text=scene_text
+                    topic, keywords, idx, resolved_style, aspect_ratio, img_path, scene_text=scene_text
                 )
             )
 

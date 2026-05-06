@@ -9,6 +9,9 @@ VisualStyle = Literal[
     "Minimal reverent illustration",
 ]
 
+AspectRatio = Literal["16:9", "9:16", "1:1"]
+ImageFitMode = Literal["fit", "fill"]
+
 
 class Scene(BaseModel):
     index: int = Field(ge=1)
@@ -22,9 +25,10 @@ class Scene(BaseModel):
 class VideoRequest(BaseModel):
     topic: str = Field(min_length=1)
     style: str = Field(min_length=1)
-    platform: str = Field(min_length=1)
-    duration_seconds: float = Field(gt=0, le=120)
+    duration_seconds: float = Field(gt=0, le=600)
     visual_style: VisualStyle = "Classical sacred art"
+    aspect_ratio: AspectRatio = "16:9"
+    image_fit_mode: ImageFitMode = "fit"
 
 
 class ManualVideoRequest(BaseModel):
@@ -36,11 +40,12 @@ class ManualVideoRequest(BaseModel):
     """
     topic: str = Field(min_length=1)
     style: str = Field(min_length=1)
-    platform: str = Field(min_length=1)
-    duration_seconds: float = Field(gt=0, le=120)
+    duration_seconds: float = Field(gt=0, le=600)
     script_text: str = Field(min_length=1)
     scenes: List[Scene] = Field(min_length=1)
     visual_style: VisualStyle = "Classical sacred art"
+    aspect_ratio: AspectRatio = "16:9"
+    image_fit_mode: ImageFitMode = "fit"
 
 
 class VideoResponse(BaseModel):

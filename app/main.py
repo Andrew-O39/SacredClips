@@ -10,6 +10,8 @@ from pydantic import TypeAdapter, ValidationError
 
 from . import config
 from .schemas import (
+    AspectRatio,
+    ImageFitMode,
     ManualVideoRequest,
     Scene,
     VideoRequest,
@@ -73,6 +75,8 @@ def _prepare_topic_dirs(topic: str) -> tuple[Path, Path, Path, Path]:
 
 
 _visual_style_adapter = TypeAdapter(VisualStyle)
+_aspect_ratio_adapter = TypeAdapter(AspectRatio)
+_image_fit_mode_adapter = TypeAdapter(ImageFitMode)
 
 
 def _normalize_visual_style(value: object) -> VisualStyle:
@@ -82,6 +86,36 @@ def _normalize_visual_style(value: object) -> VisualStyle:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"error": "Invalid visual_style", "detail": exc.errors()},
+        ) from exc
+
+
+def _normalize_aspect_ratio(value: object) -> AspectRatio:
+    try:
+        return _aspect_ratio_adapter.validate_python(value)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error": "Invalid aspect_ratio", "detail": exc.errors()},
+        ) from exc
+
+
+def _clamp_duration_by_aspect(duration_seconds: float, aspect_ratio: AspectRatio) -> float:
+    if aspect_ratio == "9:16":
+        lo, hi = 60.0, 90.0
+    elif aspect_ratio == "1:1":
+        lo, hi = 60.0, 180.0
+    else:
+        lo, hi = 120.0, 600.0
+    return max(lo, min(float(duration_seconds), hi))
+
+
+def _normalize_image_fit_mode(value: object) -> ImageFitMode:
+    try:
+        return _image_fit_mode_adapter.validate_python(value)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error": "Invalid image_fit_mode", "detail": exc.errors()},
         ) from exc
 
 
@@ -125,6 +159,8 @@ def _finalize_video_response(
     audio_path: str,
     videos_dir: Path,
     used_ai_flag: bool,
+    aspect_ratio: AspectRatio,
+    image_fit_mode: str = "fit",
 ) -> VideoResponse:
     scene_durations = [s.duration_seconds for s in scenes_ordered]
     video_path = video_service.render_video(
@@ -133,6 +169,8 @@ def _finalize_video_response(
         scene_durations=scene_durations,
         output_dir=str(videos_dir),
         filename="final_video.mp4",
+        aspect_ratio=aspect_ratio,
+        image_fit_mode=image_fit_mode,
     )
     abs_video_path = Path(video_path).resolve()
     rel_to_media = abs_video_path.relative_to(media_root)
@@ -161,6 +199,7 @@ def _regenerate_from_manual_request(req: ManualVideoRequest) -> VideoResponse:
         per_scene_keywords=per_scene_keywords,
         output_dir=str(images_dir),
         visual_style=req.visual_style,
+        aspect_ratio=req.aspect_ratio,
         scene_texts=scene_texts,
     )
 
@@ -178,13 +217,14 @@ def _regenerate_from_manual_request(req: ManualVideoRequest) -> VideoResponse:
         audio_path=audio_path,
         videos_dir=videos_dir,
         used_ai_flag=False,
+        aspect_ratio=req.aspect_ratio,
+        image_fit_mode=req.image_fit_mode,
     )
 
 
 @app.post("/generate-video", response_model=VideoResponse)
 def generate_video(req: VideoRequest):
-    # Clamp requested duration into [60, 90] for stricter control
-    target_duration = max(60.0, min(float(req.duration_seconds), 90.0))
+    target_duration = _clamp_duration_by_aspect(req.duration_seconds, req.aspect_ratio)
 
     _, audio_dir, images_dir, videos_dir = _prepare_topic_dirs(req.topic)
 
@@ -192,9 +232,10 @@ def generate_video(req: VideoRequest):
     req_for_script = VideoRequest(
         topic=req.topic,
         style=req.style,
-        platform=req.platform,
         duration_seconds=target_duration,
         visual_style=req.visual_style,
+        aspect_ratio=req.aspect_ratio,
+        image_fit_mode=req.image_fit_mode,
     )
     script_text, scenes_raw, used_ai = script_service.generate_script(req_for_script)
     scenes_ordered = [_strip_scene_for_render(s) for s in _sort_scenes(scenes_raw)]
@@ -207,6 +248,7 @@ def generate_video(req: VideoRequest):
         per_scene_keywords=per_scene_keywords,
         output_dir=str(images_dir),
         visual_style=req.visual_style,
+        aspect_ratio=req.aspect_ratio,
         scene_texts=scene_texts,
     )
 
@@ -225,6 +267,8 @@ def generate_video(req: VideoRequest):
         audio_path=audio_path,
         videos_dir=videos_dir,
         used_ai_flag=used_ai,
+        aspect_ratio=req.aspect_ratio,
+        image_fit_mode=req.image_fit_mode,
     )
 
 
@@ -258,7 +302,6 @@ async def manual_video(request: Request):
       - script_text (str)
       - scenes_json (JSON array of Scene objects without image_url required)
       - visual_style (optional)
-      - platform (optional, ignored for now)
       - duration_seconds (optional, ignored for render but kept for API parity)
       - style (optional, ignored)
     Optional file fields per scene: scene_upload_{scene.index}
@@ -268,6 +311,11 @@ async def manual_video(request: Request):
     topic = form.get("topic")
     script_text = form.get("script_text")
     scenes_json = form.get("scenes_json")
+    narration_source_raw = form.get("narration_source")
+    narration_source = narration_source_raw.strip().lower() if isinstance(narration_source_raw, str) else "tts"
+    if narration_source not in {"tts", "upload"}:
+        raise HTTPException(status_code=400, detail="Invalid narration_source. Use 'tts' or 'upload'.")
+    print(f"[manual-video] narration_source={narration_source}")
     if not isinstance(topic, str) or not topic.strip():
         raise HTTPException(status_code=400, detail="topic is required")
     if not isinstance(script_text, str):
@@ -295,6 +343,16 @@ async def manual_video(request: Request):
         visual_style = _normalize_visual_style("Classical sacred art")
     else:
         visual_style = _normalize_visual_style(vs_raw)
+    ar_raw = form.get("aspect_ratio")
+    if ar_raw is None or ar_raw == "":
+        aspect_ratio = _normalize_aspect_ratio("16:9")
+    else:
+        aspect_ratio = _normalize_aspect_ratio(ar_raw)
+    ifm_raw = form.get("image_fit_mode")
+    if ifm_raw is None or ifm_raw == "":
+        image_fit_mode = _normalize_image_fit_mode("fill" if aspect_ratio == "9:16" else "fit")
+    else:
+        image_fit_mode = _normalize_image_fit_mode(ifm_raw)
 
     _, audio_dir, images_dir, videos_dir = _prepare_topic_dirs(topic)
     scenes_ordered = [_strip_scene_for_render(s) for s in _sort_scenes(scene_models)]
@@ -326,6 +384,7 @@ async def manual_video(request: Request):
                 per_scene_keywords=[s.keywords],
                 output_dir=str(ai_scene_dir),
                 visual_style=visual_style,
+                aspect_ratio=aspect_ratio,
                 scene_texts=[s.text],
             )
             if generated:
@@ -339,6 +398,7 @@ async def manual_video(request: Request):
                 keywords=s.keywords,
                 scene_index=s.index,
                 visual_style=visual_style,
+                aspect_ratio=aspect_ratio,
                 output_path=str(dest),
                 scene_text=s.text,
             )
@@ -366,6 +426,7 @@ async def manual_video(request: Request):
                     keywords=s.keywords,
                     scene_index=s.index,
                     visual_style=visual_style,
+                    aspect_ratio=aspect_ratio,
                     output_path=str(dest),
                     scene_text=s.text,
                 )
@@ -385,6 +446,7 @@ async def manual_video(request: Request):
                         keywords=s.keywords,
                         scene_index=s.index,
                         visual_style=visual_style,
+                        aspect_ratio=aspect_ratio,
                         output_path=str(fallback),
                         scene_text=s.text,
                     )
@@ -409,17 +471,56 @@ async def manual_video(request: Request):
             keywords=s.keywords,
             scene_index=s.index,
             visual_style=visual_style,
+            aspect_ratio=aspect_ratio,
             output_path=str(dest),
             scene_text=s.text,
         )
         print(f"[manual-video] scene={s.index} using image path: {dest.resolve()} (source=placeholder)")
         image_paths.append(str(dest.resolve()))
 
-    audio_path = tts_service.text_to_speech(
-        text=script_text,
-        output_dir=str(audio_dir),
-        filename="voiceover.mp3",
-    )
+    if narration_source == "upload":
+        audio_files = form.getlist("audio_upload")
+        audio_val = audio_files[0] if audio_files else None
+        is_audio_upload = hasattr(audio_val, "filename") and hasattr(audio_val, "read")
+        audio_filename = getattr(audio_val, "filename", None) if is_audio_upload else None
+        if not (is_audio_upload and audio_filename):
+            raise HTTPException(status_code=400, detail="audio_upload is required when narration_source='upload'.")
+
+        allowed_audio_ext = {".mp3", ".wav", ".m4a", ".aac", ".ogg"}
+        suffix = Path(str(audio_filename)).suffix.lower()
+        if suffix not in allowed_audio_ext:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported audio extension '{suffix}'. Allowed: {sorted(allowed_audio_ext)}",
+            )
+
+        uploaded_audio_path = (audio_dir / f"uploaded_narration{suffix}").resolve()
+        try:
+            audio_bytes = await audio_val.read()
+        except Exception as read_exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Could not read uploaded narration audio: {read_exc}",
+            ) from read_exc
+
+        uploaded_audio_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(uploaded_audio_path, "wb") as f:
+            f.write(audio_bytes or b"")
+
+        if not uploaded_audio_path.exists() or uploaded_audio_path.stat().st_size <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Uploaded narration audio is empty or could not be saved.",
+            )
+
+        print(f"[manual-video] uploaded narration saved: {uploaded_audio_path}")
+        audio_path = str(uploaded_audio_path)
+    else:
+        audio_path = tts_service.text_to_speech(
+            text=script_text,
+            output_dir=str(audio_dir),
+            filename="voiceover.mp3",
+        )
 
     return _finalize_video_response(
         topic=topic,
@@ -429,6 +530,8 @@ async def manual_video(request: Request):
         audio_path=audio_path,
         videos_dir=videos_dir,
         used_ai_flag=False,
+        aspect_ratio=aspect_ratio,
+        image_fit_mode=image_fit_mode,
     )
 
 
