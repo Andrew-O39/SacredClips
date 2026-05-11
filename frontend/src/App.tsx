@@ -1304,10 +1304,15 @@ export const App: React.FC = () => {
                     <>
                       <strong>AI mode:</strong> This clip uses AI-generated script, images, and narration.
                     </>
+                  ) : creationMode === 'manual' ? (
+                    <>
+                      <strong>Manual mode:</strong> This clip was created from your manual inputs. Some visuals may be
+                      uploaded images, AI-generated images, or placeholders depending on your scene settings.
+                    </>
                   ) : (
                     <>
-                      <strong>Demo/manual mode:</strong> Script was edited or AI generation failed. Using your text and
-                      placeholder/AI visuals.
+                      <strong>Fallback/manual mode:</strong> AI generation was unavailable, so the app used fallback
+                      content or your edited inputs.
                     </>
                   )}
                 </div>
@@ -1420,7 +1425,7 @@ export const App: React.FC = () => {
                               onClick={() => moveScene(scene.index, 'up')}
                               disabled={listIdx === 0}
                             >
-                              Move up
+                              Move Left
                             </button>
                             <button
                               type="button"
@@ -1428,7 +1433,7 @@ export const App: React.FC = () => {
                               onClick={() => moveScene(scene.index, 'down')}
                               disabled={listIdx === editedScenes.length - 1}
                             >
-                              Move down
+                              Move Right
                             </button>
                           </div>
                         </div>
