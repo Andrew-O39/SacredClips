@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 
 const API_BASE_URL = 'http://localhost:8000'
 
@@ -29,6 +29,10 @@ type ManualNarrationSource = 'tts' | 'upload'
 type GenerationProfile = 'ai' | 'manual_tts' | 'manual_upload' | 'regenerate'
 type ImageFitMode = 'fit' | 'fill'
 
+function roundToHalfSecond(value: number): number {
+  return Math.max(0.5, Math.round(value * 2) / 2)
+}
+
 function scenesForApiPayload(scenes: Scene[]): {
   index: number
   text: string
@@ -53,7 +57,7 @@ function sanitizeScenesForPayload(scenes: Scene[]): {
     const safeText = s.text.trim() || `Manual visual scene ${s.index}`
     const safeKeywords = (s.keywords || []).map(k => k.trim()).filter(Boolean)
     const safeDuration = Number.isFinite(s.duration_seconds) && s.duration_seconds > 0
-      ? s.duration_seconds
+      ? roundToHalfSecond(s.duration_seconds)
       : 10
     return {
       index: s.index,
@@ -70,7 +74,7 @@ function splitScriptIntoScenes(script: string, targetTotalSeconds: number): Scen
   const blocks = trimmed.split(/\n\s*\n/).map(b => b.trim()).filter(Boolean)
   const paragraphs = blocks.length ? blocks : [trimmed.replace(/\s+/g, ' ').trim()]
   const n = paragraphs.length
-  const per = Math.max(8, targetTotalSeconds / n)
+  const per = roundToHalfSecond(Math.max(8, targetTotalSeconds / n))
   return paragraphs.map((p, i) => ({
     index: i + 1,
     text: p.replace(/\n+/g, ' ').trim(),
@@ -81,6 +85,32 @@ function splitScriptIntoScenes(script: string, targetTotalSeconds: number): Scen
 
 function reindexScenes(scenes: Scene[]): Scene[] {
   return scenes.map((scene, i) => ({ ...scene, index: i + 1 }))
+}
+
+const SCENE_CUT_MIN_SEPARATION_SEC = 0.5
+
+/** Cut times are end-of-segment timestamps in seconds; returns segment lengths or null if invalid. */
+function computeSegmentDurationsFromCuts(cuts: number[], totalDuration: number): number[] | null {
+  if (!Number.isFinite(totalDuration) || totalDuration <= 0) return null
+  const sorted = [...cuts].sort((a, b) => a - b)
+  if (sorted.some(c => c <= 0 || c >= totalDuration)) return null
+  const segments: number[] = []
+  if (sorted.length === 0) {
+    segments.push(totalDuration)
+  } else {
+    segments.push(sorted[0])
+    for (let i = 1; i < sorted.length; i++) {
+      segments.push(sorted[i] - sorted[i - 1])
+    }
+    segments.push(totalDuration - sorted[sorted.length - 1])
+  }
+  if (segments.some(d => !Number.isFinite(d) || d <= 0)) return null
+  return segments
+}
+
+function formatAudioSeconds(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) return '0.00 s'
+  return `${sec.toFixed(2)} s`
 }
 
 type VideoResponse = {
@@ -118,6 +148,13 @@ export const App: React.FC = () => {
   const [manualImageModes, setManualImageModes] = useState<Record<number, ManualImageMode>>({})
   const [manualNarrationSource, setManualNarrationSource] = useState<ManualNarrationSource>('tts')
   const [manualAudioUpload, setManualAudioUpload] = useState<File | undefined>(undefined)
+
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const [uploadedAudioUrl, setUploadedAudioUrl] = useState('')
+  const [uploadedAudioDuration, setUploadedAudioDuration] = useState(0)
+  const [uploadedAudioCurrentTime, setUploadedAudioCurrentTime] = useState(0)
+  const [sceneCutTimes, setSceneCutTimes] = useState<number[]>([])
+
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<VideoResponse | null>(null)
@@ -379,7 +416,7 @@ export const App: React.FC = () => {
                 index: 1,
                 text: '',
                 keywords: ['manual scene'],
-                duration_seconds: Math.max(15, duration / 4),
+                duration_seconds: roundToHalfSecond(Math.max(15, duration / 4)),
               },
             ],
       )
@@ -660,6 +697,108 @@ export const App: React.FC = () => {
     return () => window.clearInterval(id)
   }, [loading, generationProfile])
 
+  useEffect(() => {
+    const shouldPreview =
+      creationMode === 'manual' && manualNarrationSource === 'upload' && manualAudioUpload != null
+
+    if (!shouldPreview) {
+      setUploadedAudioUrl('')
+      setUploadedAudioDuration(0)
+      setUploadedAudioCurrentTime(0)
+      setSceneCutTimes([])
+      return undefined
+    }
+
+    const url = URL.createObjectURL(manualAudioUpload)
+    setUploadedAudioUrl(url)
+    setSceneCutTimes([])
+    setUploadedAudioDuration(0)
+    setUploadedAudioCurrentTime(0)
+
+    return () => {
+      URL.revokeObjectURL(url)
+    }
+  }, [creationMode, manualNarrationSource, manualAudioUpload])
+
+  const syncAudioDurationFromElement = () => {
+    const el = audioRef.current
+    if (!el) return
+    const d = el.duration
+    if (Number.isFinite(d) && d > 0 && d !== Number.POSITIVE_INFINITY) {
+      setUploadedAudioDuration(d)
+    }
+  }
+
+  const syncAudioCurrentTimeFromElement = () => {
+    const el = audioRef.current
+    if (!el) return
+    const t = el.currentTime
+    if (Number.isFinite(t)) setUploadedAudioCurrentTime(t)
+  }
+
+  const addSceneCutAtPlayhead = () => {
+    const el = audioRef.current
+    if (!el) return
+    const dur = el.duration
+    if (!Number.isFinite(dur) || dur <= 0 || dur === Number.POSITIVE_INFINITY) return
+    const t = el.currentTime
+    if (t <= 0 || t >= dur) return
+    setSceneCutTimes(prev => {
+      if (prev.some(c => Math.abs(c - t) < SCENE_CUT_MIN_SEPARATION_SEC)) return prev
+      return [...prev, t].sort((a, b) => a - b)
+    })
+  }
+
+  const removeSceneCutAtIndex = (index: number) => {
+    setSceneCutTimes(prev => prev.filter((_, i) => i !== index))
+  }
+
+  const applySceneCutsToScenes = () => {
+    const el = audioRef.current
+    const fromEl = el?.duration
+    const total =
+      Number.isFinite(fromEl) && fromEl! > 0 && fromEl !== Number.POSITIVE_INFINITY
+        ? fromEl!
+        : uploadedAudioDuration
+    const segs = computeSegmentDurationsFromCuts(sceneCutTimes, total)
+    if (!segs) {
+      setError(
+        'Cannot apply cuts: wait for the audio duration to load, and ensure each cut is after 0 and before the end of the file.',
+      )
+      return
+    }
+    setError(null)
+    const prevScenes = editedScenes
+    const nextUploads: Record<number, File | undefined> = {}
+    const nextModes: Record<number, ManualImageMode> = {}
+    const newScenes: Scene[] = segs.map((dur, i) => {
+      const roundedDur = roundToHalfSecond(dur)
+      const newIndex = i + 1
+      const old = prevScenes.find(s => s.index === newIndex)
+      if (old) {
+        if (manualUploads[newIndex]) nextUploads[newIndex] = manualUploads[newIndex]
+        if (manualImageModes[newIndex]) nextModes[newIndex] = manualImageModes[newIndex]
+        return {
+          ...old,
+          index: newIndex,
+          text: old.text?.trim() ? old.text : `Manual visual scene ${newIndex}`,
+          keywords: old.keywords?.length ? [...old.keywords] : ['manual scene'],
+          duration_seconds: roundedDur,
+        }
+      }
+      return {
+        index: newIndex,
+        text: `Manual visual scene ${newIndex}`,
+        keywords: ['manual scene'],
+        duration_seconds: roundedDur,
+        image_url: null,
+      }
+    })
+    setEditedScenes(newScenes)
+    setManualUploads(nextUploads)
+    setManualImageModes(nextModes)
+  }
+
   return (
     <div className="app-shell">
       <div className="app-container">
@@ -852,6 +991,93 @@ export const App: React.FC = () => {
                     <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
                       Uploaded narration will be used as the video audio track (TTS is skipped).
                     </p>
+                    {manualAudioUpload && (
+                      <div className="editor-section" style={{ marginTop: '1rem' }}>
+                        <div className="field-label">Audio timing assistant</div>
+                        <p className="footer-hint">
+                          {
+                            'Play your uploaded narration and click "Add scene cut here" whenever you want the image to change.'
+                          }
+                        </p>
+                        <p className="footer-hint">
+                          Scene durations are used as visual timing and will be scaled to the uploaded audio if
+                          needed.
+                        </p>
+                        <div className="result-block result-block--expanded">
+                          {uploadedAudioUrl ? (
+                            <audio
+                              key={uploadedAudioUrl}
+                              ref={audioRef}
+                              src={uploadedAudioUrl}
+                              controls
+                              onLoadedMetadata={syncAudioDurationFromElement}
+                              onDurationChange={syncAudioDurationFromElement}
+                              onTimeUpdate={syncAudioCurrentTimeFromElement}
+                              onSeeking={syncAudioCurrentTimeFromElement}
+                              onSeeked={syncAudioCurrentTimeFromElement}
+                              className="timing-assistant-audio"
+                            />
+                          ) : (
+                            <p className="footer-hint" style={{ marginTop: '0.5rem' }}>
+                              Preparing audio preview…
+                            </p>
+                          )}
+                          <div className="action-row" style={{ marginTop: '0.65rem' }}>
+                            <span className="footer-hint" style={{ marginTop: 0 }}>
+                              Current: {formatAudioSeconds(uploadedAudioCurrentTime)}
+                            </span>
+                            <span className="footer-hint" style={{ marginTop: 0 }}>
+                              Duration: {formatAudioSeconds(uploadedAudioDuration)}
+                            </span>
+                          </div>
+                          <div className="action-row">
+                            <button
+                              type="button"
+                              className="button button-secondary"
+                              disabled={loading || !uploadedAudioUrl}
+                              onClick={addSceneCutAtPlayhead}
+                            >
+                              Add scene cut here
+                            </button>
+                            <button
+                              type="button"
+                              className="button button-secondary"
+                              disabled={
+                                loading ||
+                                !uploadedAudioUrl ||
+                                !Number.isFinite(uploadedAudioDuration) ||
+                                uploadedAudioDuration <= 0
+                              }
+                              onClick={applySceneCutsToScenes}
+                            >
+                              Apply cuts to scenes
+                            </button>
+                          </div>
+                          {sceneCutTimes.length > 0 && (
+                            <div style={{ marginTop: '0.75rem' }}>
+                              <div className="field-label">Scene cuts ({sceneCutTimes.length})</div>
+                              <ul className="scene-cut-list">
+                                {sceneCutTimes.map((t, i) => (
+                                  <li key={`${i}-${t}`} className="scene-cut-list-item">
+                                    <span className="footer-hint" style={{ marginTop: 0 }}>
+                                      Cut {i + 1}: {t.toFixed(3)}s
+                                    </span>
+                                    <button
+                                      type="button"
+                                      className="tiny-button"
+                                      disabled={loading}
+                                      onClick={() => removeSceneCutAtIndex(i)}
+                                    >
+                                      Remove
+                                    </button>
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -990,8 +1216,9 @@ export const App: React.FC = () => {
                           value={scene.duration_seconds}
                           onChange={e =>
                             updateScene(scene.index, {
-                              duration_seconds:
-                                Number.parseFloat(e.target.value.replace(',', '.')) || 5,
+                            duration_seconds: roundToHalfSecond(
+                              Number.parseFloat(e.target.value.replace(',', '.')) || 5,
+                            ),
                             })
                           }
                         />
@@ -1253,8 +1480,9 @@ export const App: React.FC = () => {
                           value={scene.duration_seconds}
                           onChange={e =>
                             updateScene(scene.index, {
-                              duration_seconds:
-                                Number.parseFloat(e.target.value.replace(',', '.')) || 5,
+                            duration_seconds: roundToHalfSecond(
+                              Number.parseFloat(e.target.value.replace(',', '.')) || 5,
+                            ),
                             })
                           }
                         />
