@@ -661,9 +661,9 @@ export const App: React.FC = () => {
   }, [loading, generationProfile])
 
   return (
-    <div className="app-root">
-      <div className="card">
-        <div>
+    <div className="app-shell">
+      <div className="app-container">
+        <div className="workspace-card">
           <div className="card-header">
             <div>
               <div className="badge">Religious video generator</div>
@@ -678,11 +678,63 @@ export const App: React.FC = () => {
             </div>
           </div>
 
+          <section className="status-panel" aria-live="polite">
+            <div className="status-panel-header">
+              <div>
+                <div className="status-text">
+                  {loading ? 'Generating' : result ? 'Ready' : 'Idle'} · Backend
+                </div>
+                <p className="secondary-text">
+                  We keep things neutral and respectful. Review each clip before posting.
+                </p>
+              </div>
+              <div className="status-dot" />
+            </div>
+
+            {loading && (
+              <div className="editor-section">
+                <div className="generation-progress-label">
+                  {generationStage || 'Generating your video...'}
+                </div>
+                <div className="generation-progress-meta">
+                  Estimated progress: {Math.floor(generationProgress)}%
+                </div>
+                <div className="generation-progress-bar">
+                  <div
+                    className="generation-progress-fill"
+                    style={{ width: `${Math.max(5, Math.floor(generationProgress))}%` }}
+                  />
+                </div>
+                <p className="footer-hint" style={{ marginTop: '0.6rem' }}>
+                  This is an estimated progress indicator. Final rendering may take longer for longer videos.
+                </p>
+              </div>
+            )}
+
+            {error && <div className="error">{error}</div>}
+
+            {!result && !loading && (
+              <>
+                <div className="pill-row">
+                  <div className="pill">What is baptism in Christianity?</div>
+                  <div className="pill">Basics of baptism</div>
+                  <div className="pill">What is the Trinity?</div>
+                  <div className="pill">What is a Sabbath?</div>
+                </div>
+                <p className="footer-hint">
+                  Tip: ask for short explainers of holidays, practices, symbols, or concepts.
+                  The app will not create political content or tell people what they should believe.
+                </p>
+              </>
+            )}
+          </section>
+
+          <section className="editor-section editor-section--creation">
           <form className="form" onSubmit={handleFormSubmit}>
             <div>
               <div className="field-label">Creation mode</div>
               <div className="range-row">
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                <label className="radio-label">
                   <input
                     type="radio"
                     name="creation-mode"
@@ -691,7 +743,7 @@ export const App: React.FC = () => {
                   />
                   AI mode
                 </label>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                <label className="radio-label">
                   <input
                     type="radio"
                     name="creation-mode"
@@ -770,7 +822,7 @@ export const App: React.FC = () => {
                   Narration source
                 </div>
                 <div className="range-row">
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                  <label className="radio-label">
                     <input
                       type="radio"
                       name="manual-narration-source"
@@ -779,7 +831,7 @@ export const App: React.FC = () => {
                     />
                     Generate AI voice from script
                   </label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                  <label className="radio-label">
                     <input
                       type="radio"
                       name="manual-narration-source"
@@ -808,10 +860,9 @@ export const App: React.FC = () => {
             <div>
               <div className="field-label">Visual style {creationMode === 'ai' ? '(AI images)' : '(placeholders)'}</div>
               <select
-                className="select"
+                className="select input-full"
                 value={visualStyle}
                 onChange={e => setVisualStyle(e.target.value as VisualStyle)}
-                style={{ width: '100%' }}
               >
                 {VISUAL_STYLE_OPTIONS.map(opt => (
                   <option key={opt} value={opt}>
@@ -824,10 +875,9 @@ export const App: React.FC = () => {
             <div>
               <div className="field-label">Content format</div>
               <select
-                className="select"
+                className="select input-full"
                 value={videoType}
                 onChange={e => handleVideoTypeChange(e.target.value as VideoType)}
-                style={{ width: '100%' }}
               >
                 <option value="normal">Normal YouTube video (16:9 horizontal)</option>
                 <option value="shorts">Shorts / TikTok / Reels (9:16 vertical)</option>
@@ -842,10 +892,9 @@ export const App: React.FC = () => {
             <div>
               <div className="field-label">Image fit</div>
               <select
-                className="select"
+                className="select input-full"
                 value={imageFitMode}
                 onChange={e => setImageFitMode(e.target.value as ImageFitMode)}
-                style={{ width: '100%' }}
               >
                 <option value="fit">Fit full image</option>
                 <option value="fill">Fill screen / crop</option>
@@ -878,125 +927,127 @@ export const App: React.FC = () => {
               </div>
             </div>
 
-            {editedScenes.length > 0 && (creationMode === 'manual' && !result) && (
+            {editedScenes.length > 0 && creationMode === 'manual' && !result && (
               <div>
                 <div className="field-label">Scenes (before render)</div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                  {editedScenes.map(scene => (
-                    <div key={scene.index} className="result-block">
-                      <div className="scene-title">Scene {scene.index}</div>
-                      <div className="button-row" style={{ marginBottom: '0.5rem' }}>
-                        <button
-                          type="button"
-                          className="tiny-button"
-                          onClick={() => duplicateManualScene(scene.index)}
-                        >
-                          Duplicate scene
-                        </button>
-                        <button
-                          type="button"
-                          className="tiny-button"
-                          onClick={() => removeManualScene(scene.index)}
-                          disabled={editedScenes.length <= 1}
-                        >
-                          Remove scene
-                        </button>
-                      </div>
-                      <textarea
-                        className="textarea"
-                        rows={3}
-                        value={scene.text}
-                        onChange={e => updateScene(scene.index, { text: e.target.value })}
-                      />
-                      <div className="field-label" style={{ marginTop: '0.35rem' }}>
-                        Image guidance keywords
-                      </div>
-                      <p className="footer-hint" style={{ marginTop: '0.25rem', marginBottom: '0.25rem' }}>
-                        Used only if you choose Generate AI image for this scene.
-                      </p>
-                      <input
-                        className="input"
-                        value={scene.keywords.join(', ')}
-                        onChange={e => {
-                          const kws = e.target.value
-                            .split(',')
-                            .map(s => s.trim())
-                            .filter(Boolean)
-                          updateScene(scene.index, {
-                            keywords: kws.length ? kws : ['manual scene'],
-                          })
-                        }}
-                      />
-                      <div className="field-label" style={{ marginTop: '0.35rem' }}>
-                        Duration (seconds)
-                      </div>
-                      <input
-                        className="input"
-                        type="number"
-                        min={1}
-                        step={0.5}
-                        value={scene.duration_seconds}
-                        onChange={e =>
-                          updateScene(scene.index, {
-                            duration_seconds:
-                              Number.parseFloat(e.target.value.replace(',', '.')) || 5,
-                          })
-                        }
-                      />
-                      <div className="field-label" style={{ marginTop: '0.35rem' }}>
-                        Image source
-                      </div>
-                      <select
-                        className="select"
-                        value={manualImageModes[scene.index] ?? (manualUploads[scene.index] ? 'upload' : 'placeholder')}
-                        onChange={e =>
-                          setManualImageModes(prev => ({
-                            ...prev,
-                            [scene.index]: e.target.value as ManualImageMode,
-                          }))
-                        }
-                        style={{ width: '100%' }}
-                      >
-                        <option value="upload">Upload image</option>
-                        <option value="generate">Generate AI image</option>
-                        <option value="placeholder">Placeholder only</option>
-                      </select>
-                      {(manualImageModes[scene.index] ?? (manualUploads[scene.index] ? 'upload' : 'placeholder')) === 'upload' && (
-                        <>
-                          <div className="field-label" style={{ marginTop: '0.35rem' }}>
-                            Upload image
+                <div className="scene-timeline">
+                  <div className="scene-timeline-track">
+                    {editedScenes.map(scene => (
+                      <div key={scene.index} className="scene-card">
+                        <div className="scene-card-header">
+                          <div className="scene-title">Scene {scene.index}</div>
+                          <div className="scene-card-actions">
+                            <button
+                              type="button"
+                              className="tiny-button"
+                              onClick={() => duplicateManualScene(scene.index)}
+                            >
+                              Duplicate
+                            </button>
+                            <button
+                              type="button"
+                              className="tiny-button"
+                              onClick={() => removeManualScene(scene.index)}
+                              disabled={editedScenes.length <= 1}
+                            >
+                              Remove
+                            </button>
                           </div>
-                          <input
-                            type="file"
-                            accept="image/*"
-                            onChange={e => {
-                              const f = e.target.files?.[0]
-                              setManualUploads(prev => ({ ...prev, [scene.index]: f }))
-                            }}
-                          />
-                        </>
-                      )}
-                      {(manualImageModes[scene.index] ?? (manualUploads[scene.index] ? 'upload' : 'placeholder')) === 'generate' && (
-                        <p className="footer-hint" style={{ marginTop: '0.4rem' }}>
-                          AI will generate this scene image using scene text + image guidance keywords.
-                        </p>
-                      )}
-                      {(manualImageModes[scene.index] ?? (manualUploads[scene.index] ? 'upload' : 'placeholder')) === 'placeholder' && (
-                        <p className="footer-hint" style={{ marginTop: '0.4rem' }}>
-                          Placeholder will be used for this scene.
-                        </p>
-                      )}
-                      {manualUploads[scene.index] && (
-                        <div style={{ marginTop: '0.5rem' }}>
-                          <img
-                            alt={`Scene ${scene.index} preview`}
-                            src={URL.createObjectURL(manualUploads[scene.index]!)}
-                            style={{ maxWidth: '100%', borderRadius: 8 }}
-                          />
                         </div>
-                      )}
-                    </div>
-                  ))}
+                        <textarea
+                          className="textarea"
+                          rows={4}
+                          value={scene.text}
+                          onChange={e => updateScene(scene.index, { text: e.target.value })}
+                        />
+                        <div className="field-label" style={{ marginTop: '0.15rem' }}>
+                          Image guidance keywords
+                        </div>
+                        <p className="footer-hint" style={{ marginTop: '0.2rem', marginBottom: '0.2rem' }}>
+                          Used only if you choose Generate AI image for this scene.
+                        </p>
+                        <input
+                          className="input"
+                          value={scene.keywords.join(', ')}
+                          onChange={e => {
+                            const kws = e.target.value
+                              .split(',')
+                              .map(s => s.trim())
+                              .filter(Boolean)
+                            updateScene(scene.index, {
+                              keywords: kws.length ? kws : ['manual scene'],
+                            })
+                          }}
+                        />
+                        <div className="field-label" style={{ marginTop: '0.35rem' }}>
+                          Duration (seconds)
+                        </div>
+                        <input
+                          className="input"
+                          type="number"
+                          min={1}
+                          step={0.5}
+                          value={scene.duration_seconds}
+                          onChange={e =>
+                            updateScene(scene.index, {
+                              duration_seconds:
+                                Number.parseFloat(e.target.value.replace(',', '.')) || 5,
+                            })
+                          }
+                        />
+                        <div className="field-label" style={{ marginTop: '0.35rem' }}>
+                          Image source
+                        </div>
+                        <select
+                          className="select input-full"
+                          value={manualImageModes[scene.index] ?? (manualUploads[scene.index] ? 'upload' : 'placeholder')}
+                          onChange={e =>
+                            setManualImageModes(prev => ({
+                              ...prev,
+                              [scene.index]: e.target.value as ManualImageMode,
+                            }))
+                          }
+                        >
+                          <option value="upload">Upload image</option>
+                          <option value="generate">Generate AI image</option>
+                          <option value="placeholder">Placeholder only</option>
+                        </select>
+                        {(manualImageModes[scene.index] ?? (manualUploads[scene.index] ? 'upload' : 'placeholder')) === 'upload' && (
+                          <>
+                            <div className="field-label" style={{ marginTop: '0.35rem' }}>
+                              Upload image
+                            </div>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              onChange={e => {
+                                const f = e.target.files?.[0]
+                                setManualUploads(prev => ({ ...prev, [scene.index]: f }))
+                              }}
+                            />
+                          </>
+                        )}
+                        {(manualImageModes[scene.index] ?? (manualUploads[scene.index] ? 'upload' : 'placeholder')) === 'generate' && (
+                          <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
+                            AI will generate this scene image using scene text + image guidance keywords.
+                          </p>
+                        )}
+                        {(manualImageModes[scene.index] ?? (manualUploads[scene.index] ? 'upload' : 'placeholder')) === 'placeholder' && (
+                          <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
+                            Placeholder will be used for this scene.
+                          </p>
+                        )}
+                        {manualUploads[scene.index] ? (
+                          <div className="scene-preview">
+                            <img
+                              alt={`Scene ${scene.index} preview`}
+                              src={URL.createObjectURL(manualUploads[scene.index]!)}
+                            />
+                          </div>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
             )}
@@ -1011,98 +1062,62 @@ export const App: React.FC = () => {
                   ? 'Generate video'
                   : 'Create manual video'}
             </button>
-
-            {error && <div className="error">{error}</div>}
           </form>
-        </div>
+          </section>
 
-        <div className="side-panel">
-          <div className="side-header">
-            <div>
-              <div className="status-text">
-                {loading ? 'Generating' : result ? 'Ready' : 'Idle'} · Backend
-              </div>
-              <p className="secondary-text">
-                We keep things neutral and respectful. Review each clip before posting.
-              </p>
-            </div>
-            <div className="status-dot" />
-          </div>
-
-          {loading && (
-            <div className="result-block">
-              <div style={{ marginBottom: '10px', fontWeight: 600 }}>
-                {generationStage || 'Generating your video...'}
-              </div>
-
-              <div style={{ fontSize: '0.9rem', marginBottom: '10px' }}>
-                Estimated progress: {Math.floor(generationProgress)}%
-              </div>
-
-              <div
-                style={{
-                  width: '100%',
-                  height: '8px',
-                  background: '#e5e7eb',
-                  borderRadius: '4px',
-                  overflow: 'hidden',
-                }}
-              >
+          {result && (
+            <>
+              <section className="editor-section">
                 <div
-                  style={{
-                    width: `${Math.max(5, Math.floor(generationProgress))}%`,
-                    height: '100%',
-                    background: '#6366f1',
-                    transition: 'width 0.5s ease',
-                  }}
-                />
-              </div>
-              <p className="footer-hint" style={{ marginTop: '0.6rem' }}>
-                This is an estimated progress indicator. Final rendering may take longer for longer videos.
-              </p>
-            </div>
-          )}
+                  className={`alert ${
+                    result.used_ai ? 'alert-success' : 'alert-warning'
+                  }`}
+                >
+                  {result.used_ai ? (
+                    <>
+                      <strong>AI mode:</strong> This clip uses AI-generated script, images, and narration.
+                    </>
+                  ) : (
+                    <>
+                      <strong>Demo/manual mode:</strong> Script was edited or AI generation failed. Using your text and
+                      placeholder/AI visuals.
+                    </>
+                  )}
+                </div>
+              </section>
 
-          {result && (
-            <div
-              className={`alert ${
-                result.used_ai ? 'alert-success' : 'alert-warning'
-              }`}
-            >
-              {result.used_ai ? (
-                <>
-                  <strong>AI mode:</strong> This clip uses AI-generated script, images, and narration.
-                </>
-              ) : (
-                <>
-                  <strong>Demo/manual mode:</strong> Script was edited or AI generation failed. Using your text and
-                  placeholder/AI visuals.
-                </>
-              )}
-            </div>
-          )}
+              <section className="editor-section editor-section--preview">
+                <div className="small-label">Preview</div>
+                <div className="video-wrapper">
+                  <video
+                    key={videoVersion}
+                    controls
+                    src={`${API_BASE_URL}${result.video_url}?v=${videoVersion}`}
+                  />
+                </div>
+                <div className="action-row">
+                  <a
+                    className="button button-secondary"
+                    href={`${API_BASE_URL}${result.video_url}?v=${videoVersion}`}
+                    download
+                  >
+                    <span className="button-icon">⬇️</span>
+                    Download MP4
+                  </a>
+                  <button type="button" className="button button-secondary" onClick={resetToNewVideo}>
+                    Start new video
+                  </button>
+                </div>
+                <p className="footer-hint">
+                  Video is rendered on your backend and served from <code>{result.video_url}</code>. You can download it
+                  as an MP4 and upload to TikTok, Instagram, or YouTube.
+                </p>
+              </section>
 
-          {!result && !loading && (
-            <>
-              <div className="pill-row">
-                <div className="pill">What is baptism in Christianity?</div>
-                <div className="pill">Basics of baptism</div>
-                <div className="pill">What is the Trinity?</div>
-                <div className="pill">What is a Sabbath?</div>
-              </div>
-              <p className="footer-hint">
-                Tip: ask for short explainers of holidays, practices, symbols, or concepts.
-                The app will not create political content or tell people what they should believe.
-              </p>
-            </>
-          )}
-
-          {result && (
-            <>
-              <div>
+              <section className="editor-section">
                 <div className="section-header-row">
                   <div className="small-label">Script</div>
-                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <div className="action-row">
                     <button
                       type="button"
                       className="tiny-button"
@@ -1126,7 +1141,7 @@ export const App: React.FC = () => {
                 </div>
 
                 {editMode ? (
-                  <div className="result-block">
+                  <div className="result-block result-block--expanded">
                     <textarea
                       className="textarea textarea-script-edit"
                       value={editedScript}
@@ -1143,13 +1158,11 @@ export const App: React.FC = () => {
                     </button>
                   </div>
                 ) : (
-                  <div className="result-block">
-                    {result.script_text}
-                  </div>
+                  <div className="script-preview-block">{result.script_text}</div>
                 )}
-              </div>
+              </section>
 
-              <div>
+              <section className="editor-section">
                 <div className="section-header-row">
                   <div className="small-label">Scene editor</div>
                 </div>
@@ -1165,100 +1178,89 @@ export const App: React.FC = () => {
                   Edit scene text, keywords, or durations, then regenerate with new AI images aligned to your edits.
                   Image previews reflect the latest render.
                 </p>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                  {editedScenes.map((scene, listIdx) => (
-                    <div key={scene.index} className="result-block">
-                      <div className="scene-title">
-                        Scene {scene.index} · {scene.duration_seconds.toFixed(1)}s
-                      </div>
-                      <div className="button-row" style={{ marginTop: '0.35rem', marginBottom: '0.5rem' }}>
-                        <button
-                          type="button"
-                          className="tiny-button"
-                          onClick={() => moveScene(scene.index, 'up')}
-                          disabled={listIdx === 0}
-                        >
-                          Move Up
-                        </button>
-                        <button
-                          type="button"
-                          className="tiny-button"
-                          onClick={() => moveScene(scene.index, 'down')}
-                          disabled={listIdx === editedScenes.length - 1}
-                        >
-                          Move Down
-                        </button>
-                      </div>
-                      {scene.image_url ? (
-                        <div style={{ marginBottom: '0.5rem' }}>
-                          <img
-                            alt={`Scene ${scene.index}`}
-                            src={`${API_BASE_URL}${scene.image_url}?v=${videoVersion}`}
-                            style={{ width: '100%', maxHeight: 220, objectFit: 'cover', borderRadius: 8 }}
-                          />
+                <div className="scene-timeline">
+                  <div className="scene-timeline-track">
+                    {editedScenes.map((scene, listIdx) => (
+                      <div key={scene.index} className="scene-card">
+                        <div className="scene-card-header">
+                          <div className="scene-title">
+                            Scene {scene.index} · {scene.duration_seconds.toFixed(1)}s
+                          </div>
+                          <div className="scene-card-actions">
+                            <button
+                              type="button"
+                              className="tiny-button"
+                              onClick={() => moveScene(scene.index, 'up')}
+                              disabled={listIdx === 0}
+                            >
+                              Move up
+                            </button>
+                            <button
+                              type="button"
+                              className="tiny-button"
+                              onClick={() => moveScene(scene.index, 'down')}
+                              disabled={listIdx === editedScenes.length - 1}
+                            >
+                              Move down
+                            </button>
+                          </div>
                         </div>
-                      ) : (
-                        <div
-                          style={{
-                            marginBottom: '0.5rem',
-                            border: '1px dashed #9ca3af',
-                            borderRadius: 8,
-                            height: 120,
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            color: '#6b7280',
-                            background: '#f9fafb',
+                        {scene.image_url ? (
+                          <div className="scene-preview">
+                            <img
+                              alt={`Scene ${scene.index}`}
+                              src={`${API_BASE_URL}${scene.image_url}?v=${videoVersion}`}
+                            />
+                          </div>
+                        ) : (
+                          <div className="scene-preview scene-preview--placeholder">No image preview yet</div>
+                        )}
+                        <textarea
+                          className="textarea"
+                          rows={5}
+                          value={scene.text}
+                          onChange={e => updateScene(scene.index, { text: e.target.value })}
+                        />
+                        <div className="field-label" style={{ marginTop: '0.15rem' }}>
+                          Image guidance keywords
+                        </div>
+                        <p className="footer-hint" style={{ marginTop: '0.2rem', marginBottom: '0.2rem' }}>
+                          {result.used_ai
+                            ? 'Used to guide regenerated AI images for this scene.'
+                            : 'Used only if you choose Generate AI image for this scene.'}
+                        </p>
+                        <input
+                          className="input"
+                          value={scene.keywords.join(', ')}
+                          onChange={e => {
+                            const kws = e.target.value
+                              .split(',')
+                              .map(s => s.trim())
+                              .filter(Boolean)
+                            updateScene(scene.index, {
+                              keywords: kws.length ? kws : ['scene'],
+                            })
                           }}
-                        >
-                          No image preview yet
+                        />
+                        <div className="field-label" style={{ marginTop: '0.35rem' }}>
+                          Duration (seconds)
                         </div>
-                      )}
-                      <textarea
-                        className="textarea"
-                        rows={4}
-                        value={scene.text}
-                        onChange={e => updateScene(scene.index, { text: e.target.value })}
-                      />
-                      <div className="field-label" style={{ marginTop: '0.35rem' }}>
-                        Image guidance keywords
+                        <input
+                          className="input"
+                          type="number"
+                          min={1}
+                          step={0.5}
+                          value={scene.duration_seconds}
+                          onChange={e =>
+                            updateScene(scene.index, {
+                              duration_seconds:
+                                Number.parseFloat(e.target.value.replace(',', '.')) || 5,
+                            })
+                          }
+                        />
                       </div>
-                      <p className="footer-hint" style={{ marginTop: '0.25rem', marginBottom: '0.25rem' }}>
-                        {result?.used_ai
-                          ? 'Used to guide regenerated AI images for this scene.'
-                          : 'Used only if you choose Generate AI image for this scene.'}
-                      </p>
-                      <input
-                        className="input"
-                        value={scene.keywords.join(', ')}
-                        onChange={e => {
-                          const kws = e.target.value
-                            .split(',')
-                            .map(s => s.trim())
-                            .filter(Boolean)
-                          updateScene(scene.index, {
-                            keywords: kws.length ? kws : ['scene'],
-                          })
-                        }}
-                      />
-                      <div className="field-label" style={{ marginTop: '0.35rem' }}>
-                        Duration (seconds)
-                      </div>
-                      <input
-                        className="input"
-                        type="number"
-                        min={1}
-                        step={0.5}
-                        value={scene.duration_seconds}
-                        onChange={e =>
-                          updateScene(scene.index, {
-                            duration_seconds:
-                              Number.parseFloat(e.target.value.replace(',', '.')) || 5,
-                          })
-                        }
-                      />
-                    </div>
-                  ))}
+                    ))}
+                  </div>
                 </div>
                 <button
                   type="button"
@@ -1270,135 +1272,98 @@ export const App: React.FC = () => {
                   <span className="button-icon">🎬</span>
                   {loading ? 'Regenerating…' : 'Regenerate video from scene edits'}
                 </button>
-              </div>
+              </section>
 
-              <div>
-                <div className="small-label">Preview</div>
-                <div className="video-wrapper">
-                  {result && (
-                    <video
-                      key={videoVersion} // force remount when version changes
-                      controls
-                      src={`${API_BASE_URL}${result.video_url}?v=${videoVersion}`} // cache-buster
+              <section className="editor-section editor-section--youtube">
+                <div className="section-header-row">
+                  <div className="small-label">YouTube Shorts</div>
+                  <div className="status-text">
+                    {youtubeChecking
+                      ? 'Checking YouTube status...'
+                      : youtubeConnected
+                        ? 'Connected to YouTube'
+                        : 'Not connected'}
+                  </div>
+                </div>
+                <div className="result-block result-block--expanded">
+                  <div className="button-row" style={{ marginBottom: '0.75rem' }}>
+                    <button
+                      type="button"
+                      className="button button-secondary"
+                      onClick={handleConnectYoutube}
+                      disabled={youtubeChecking}
+                    >
+                      <span className="button-icon">📺</span>
+                      {youtubeConnected ? 'Reconnect YouTube' : 'Connect YouTube'}
+                    </button>
+                    <button
+                      type="button"
+                      className="tiny-button"
+                      onClick={fetchYoutubeStatus}
+                      disabled={youtubeChecking}
+                    >
+                      Refresh status
+                    </button>
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                    <input
+                      className="input"
+                      placeholder="YouTube title"
+                      value={youtubeTitle}
+                      onChange={e => setYoutubeTitle(e.target.value)}
                     />
+                    <textarea
+                      className="textarea"
+                      placeholder="YouTube description"
+                      value={youtubeDescription}
+                      onChange={e => setYoutubeDescription(e.target.value)}
+                      rows={3}
+                    />
+                    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                      <div className="field-label" style={{ marginBottom: 0 }}>
+                        Privacy
+                      </div>
+                      <select
+                        className="select"
+                        value={youtubePrivacy}
+                        onChange={e =>
+                          setYoutubePrivacy(e.target.value as 'private' | 'unlisted' | 'public')
+                        }
+                      >
+                        <option value="private">Private</option>
+                        <option value="unlisted">Unlisted</option>
+                        <option value="public">Public</option>
+                      </select>
+                      <button
+                        type="button"
+                        className="button"
+                        onClick={handleUploadToYoutube}
+                        disabled={youtubeUploading || loading || !result || !youtubeConnected}
+                      >
+                        <span className="button-icon">{youtubeUploading ? '⏳' : '📤'}</span>
+                        {youtubeUploading ? 'Uploading…' : 'Upload to YouTube'}
+                      </button>
+                    </div>
+                  </div>
+
+                  {youtubeError && (
+                    <div className="error" style={{ marginTop: '0.5rem' }}>
+                      {youtubeError}
+                    </div>
+                  )}
+                  {youtubeSuccessUrl && (
+                    <p className="footer-hint" style={{ marginTop: '0.5rem' }}>
+                      Uploaded to YouTube:{' '}
+                      <a href={youtubeSuccessUrl} target="_blank" rel="noreferrer">
+                        {youtubeSuccessUrl}
+                      </a>
+                    </p>
                   )}
                 </div>
-
-                <div className="button-row">
-                  <a
-                    className="button button-secondary"
-                    href={`${API_BASE_URL}${result.video_url}?v=${videoVersion}`}
-                    download
-                  >
-                    <span className="button-icon">⬇️</span>
-                    Download MP4
-                  </a>
-                  <button
-                    type="button"
-                    className="button button-secondary"
-                    onClick={resetToNewVideo}
-                  >
-                    Start new video
-                  </button>
-                </div>
-
-                <p className="footer-hint">
-                  Video is rendered on your backend and served from <code>{result.video_url}</code>. You can download it
-                  as an MP4 and upload to TikTok, Instagram, or YouTube.
-                </p>
-
-                <div style={{ marginTop: '1.5rem' }}>
-                  <div className="section-header-row">
-                    <div className="small-label">YouTube Shorts</div>
-                    <div className="status-text">
-                      {youtubeChecking
-                        ? 'Checking YouTube status...'
-                        : youtubeConnected
-                          ? 'Connected to YouTube'
-                          : 'Not connected'}
-                    </div>
-                  </div>
-                  <div className="result-block">
-                    <div className="button-row" style={{ marginBottom: '0.75rem' }}>
-                      <button
-                        type="button"
-                        className="button button-secondary"
-                        onClick={handleConnectYoutube}
-                        disabled={youtubeChecking}
-                      >
-                        <span className="button-icon">📺</span>
-                        {youtubeConnected ? 'Reconnect YouTube' : 'Connect YouTube'}
-                      </button>
-                      <button
-                        type="button"
-                        className="tiny-button"
-                        onClick={fetchYoutubeStatus}
-                        disabled={youtubeChecking}
-                      >
-                        Refresh status
-                      </button>
-                    </div>
-
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                      <input
-                        className="input"
-                        placeholder="YouTube title"
-                        value={youtubeTitle}
-                        onChange={e => setYoutubeTitle(e.target.value)}
-                      />
-                      <textarea
-                        className="textarea"
-                        placeholder="YouTube description"
-                        value={youtubeDescription}
-                        onChange={e => setYoutubeDescription(e.target.value)}
-                        rows={3}
-                      />
-                      <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
-                        <div className="field-label" style={{ marginBottom: 0 }}>
-                          Privacy
-                        </div>
-                        <select
-                          className="select"
-                          value={youtubePrivacy}
-                          onChange={e =>
-                            setYoutubePrivacy(e.target.value as 'private' | 'unlisted' | 'public')
-                          }
-                        >
-                          <option value="private">Private</option>
-                          <option value="unlisted">Unlisted</option>
-                          <option value="public">Public</option>
-                        </select>
-                        <button
-                          type="button"
-                          className="button"
-                          onClick={handleUploadToYoutube}
-                          disabled={youtubeUploading || loading || !result || !youtubeConnected}
-                        >
-                          <span className="button-icon">{youtubeUploading ? '⏳' : '📤'}</span>
-                          {youtubeUploading ? 'Uploading…' : 'Upload to YouTube'}
-                        </button>
-                      </div>
-                    </div>
-
-                    {youtubeError && (
-                      <div className="error" style={{ marginTop: '0.5rem' }}>
-                        {youtubeError}
-                      </div>
-                    )}
-                    {youtubeSuccessUrl && (
-                      <p className="footer-hint" style={{ marginTop: '0.5rem' }}>
-                        Uploaded to YouTube:{' '}
-                        <a href={youtubeSuccessUrl} target="_blank" rel="noreferrer">
-                          {youtubeSuccessUrl}
-                        </a>
-                      </p>
-                    )}
-                  </div>
-                </div>
-              </div>
+              </section>
             </>
           )}
-
         </div>
       </div>
     </div>

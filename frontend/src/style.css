@@ -11,40 +11,226 @@ body {
   color: #e5e7eb;
 }
 
-.app-root {
+.app-shell {
   min-height: 100vh;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
-  padding: 2rem;
+  padding: 1.25rem 1rem 2.5rem;
 }
 
-.card {
+.app-container {
   width: 100%;
-  max-width: 900px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.workspace-card {
+  width: 100%;
   background: rgba(15, 23, 42, 0.95);
   border-radius: 1.5rem;
   box-shadow:
     0 0 0 1px rgba(148, 163, 184, 0.12),
     0 24px 60px rgba(15, 23, 42, 0.8);
-  padding: 2.5rem;
-  display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
-  gap: 2rem;
+  padding: 2rem 2.25rem 2.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
 }
 
 @media (max-width: 900px) {
-  .card {
-    grid-template-columns: minmax(0, 1fr);
-    padding: 1.5rem;
+  .app-shell {
+    padding: 1rem 0.75rem 1.5rem;
   }
+
+  .workspace-card {
+    padding: 1.35rem 1.1rem 1.75rem;
+    gap: 1.25rem;
+  }
+}
+
+.editor-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.editor-section--bordered {
+  padding: 1.25rem 1.35rem;
+  border-radius: 1.2rem;
+  background: radial-gradient(circle at top left, rgba(129, 140, 248, 0.12), transparent) border-box,
+    linear-gradient(135deg, rgba(30, 64, 175, 0.35), rgba(15, 23, 42, 0.92)) padding-box;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+}
+
+.status-panel {
+  border-radius: 1.1rem;
+  padding: 1.1rem 1.25rem;
+  background: linear-gradient(135deg, rgba(30, 41, 59, 0.95), rgba(15, 23, 42, 0.98));
+  border: 1px solid rgba(129, 140, 248, 0.35);
+  box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.15), 0 8px 28px rgba(15, 23, 42, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.status-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.status-panel .error {
+  margin-top: 0;
+  padding: 0.65rem 0.85rem;
+  border-radius: 0.65rem;
+  background: rgba(127, 29, 29, 0.25);
+  border: 1px solid rgba(252, 165, 165, 0.35);
+}
+
+.generation-progress-bar {
+  width: 100%;
+  height: 8px;
+  background: #1e293b;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+.generation-progress-fill {
+  height: 100%;
+  background: #6366f1;
+  transition: width 0.5s ease;
+}
+
+.generation-progress-label {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: #e5e7eb;
+}
+
+.generation-progress-meta {
+  font-size: 0.88rem;
+  color: #94a3b8;
+}
+
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+  margin-top: 0.75rem;
+}
+
+.scene-timeline {
+  overflow-x: auto;
+  overflow-y: visible;
+  padding: 0.35rem 0.15rem 0.65rem;
+  margin: 0 -0.15rem;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-color: rgba(129, 140, 248, 0.5) rgba(15, 23, 42, 0.6);
+}
+
+.scene-timeline-track {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  gap: 1rem;
+  align-items: stretch;
+  min-width: min-content;
+}
+
+.scene-card {
+  flex: 0 0 auto;
+  width: clamp(320px, 36vw, 420px);
+  min-width: 320px;
+  max-width: 420px;
+  padding: 1rem 1.1rem;
+  border-radius: 1rem;
+  background: rgba(15, 23, 42, 0.92);
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.scene-card .textarea {
+  min-height: 100px;
+  resize: vertical;
+}
+
+.scene-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.scene-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.scene-preview {
+  border-radius: 0.75rem;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  background: #020617;
+  aspect-ratio: 16 / 10;
+  max-height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.scene-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.scene-preview--placeholder {
+  color: #6b7280;
+  font-size: 0.8rem;
+  text-align: center;
+  padding: 0.75rem;
+  background: #0f172a;
+  aspect-ratio: auto;
+  min-height: 140px;
+}
+
+.input-full {
+  width: 100%;
+}
+
+.script-preview-block {
+  margin-top: 0.5rem;
+  padding: 0.9rem 1rem;
+  border-radius: 0.9rem;
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  font-size: 0.88rem;
+  line-height: 1.55;
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
 }
 
 .card-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 1.5rem;
+  margin-bottom: 0.35rem;
+}
+
+.radio-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
 }
 
 .badge {
@@ -84,7 +270,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 1rem;
-  margin-top: 1rem;
+  margin-top: 0.5rem;
 }
 
 .field-label {
@@ -204,26 +390,21 @@ body {
   filter: brightness(1.05);
 }
 
+.action-row .button,
+.action-row .button-secondary {
+  margin-top: 0;
+}
+
+.editor-section--preview .video-wrapper {
+  margin-top: 0.5rem;
+}
+
+.editor-section .alert {
+  margin-top: 0;
+}
+
 .button-icon {
   font-size: 1rem;
-}
-
-.side-panel {
-  border-radius: 1.2rem;
-  padding: 1.4rem;
-  background: radial-gradient(circle at top left, rgba(129, 140, 248, 0.18), transparent) border-box,
-              linear-gradient(135deg, rgba(30, 64, 175, 0.9), rgba(15, 23, 42, 0.95)) padding-box;
-  border: 1px solid rgba(148, 163, 184, 0.6);
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-
-.side-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
 }
 
 .status-dot {
@@ -271,6 +452,10 @@ body {
   overflow: auto;
   font-size: 0.85rem;
   line-height: 1.5;
+}
+
+.result-block--expanded {
+  max-height: none;
 }
 
 .scene-list {
@@ -354,6 +539,11 @@ video {
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.section-header-row .action-row {
+  margin-top: 0;
 }
 
 .tiny-button {
