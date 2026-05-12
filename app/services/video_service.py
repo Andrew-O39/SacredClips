@@ -10,9 +10,7 @@ from moviepy import AudioFileClip, ColorClip, CompositeVideoClip, ImageClip, con
 
 MIN_SCENE_CLIP = 0.25
 
-# Gentle zoom: visible but still restrained (was 1.06; MoviePy time-resize often looked static).
-GENTLE_ZOOM_SCALE_START = 1.0
-GENTLE_ZOOM_SCALE_END = 1.12
+# Zoom end scale (start is always 1.0) by motion_intensity — see _zoom_end_for_intensity.
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _MUSIC_DIR = _PROJECT_ROOT / "assets" / "music"
@@ -45,6 +43,48 @@ def _scene_log_tag(scene_index: Optional[int]) -> str:
     return f"scene={scene_index} "
 
 
+def _normalize_motion_intensity(raw: object) -> str:
+    s = (raw if isinstance(raw, str) else str(raw or "")).strip().lower()
+    if s in ("subtle", "medium", "strong"):
+        return s
+    return "subtle"
+
+
+def _zoom_end_for_intensity(motion_intensity: str) -> float:
+    """Max uniform scale over the scene (1.0 -> end)."""
+    mi = _normalize_motion_intensity(motion_intensity)
+    return {"subtle": 1.12, "medium": 1.18, "strong": 1.25}.get(mi, 1.12)
+
+
+def _slow_pan_geometry(
+    width: int,
+    height: int,
+    motion_intensity: str,
+    *,
+    strength_scale: float = 1.0,
+) -> tuple[int, int, int]:
+    """
+    Pan distance (pixels) and widened frame size for horizontal pan.
+    strength_scale < 1 reduces pan (e.g. Ken Burns vs full slow_pan).
+    """
+    mi = _normalize_motion_intensity(motion_intensity)
+    if mi == "strong":
+        frac, widen = 0.036, 1.078
+    elif mi == "medium":
+        frac, widen = 0.028, 1.056
+    else:
+        frac, widen = 0.017, 1.034
+    pan_px = max(1, int(frac * int(width) * float(strength_scale)))
+    nw = max(width + 1, int(round(width * widen)))
+    nh = int(height)
+    return pan_px, nw, nh
+
+
+def _ken_burns_pan_strength_scale(motion_intensity: str) -> float:
+    mi = _normalize_motion_intensity(motion_intensity)
+    return {"subtle": 0.50, "medium": 0.68, "strong": 0.88}.get(mi, 0.50)
+
+
 def _subclip_compat(clip, t0: float, t1: float):
     try:
         return clip.subclipped(t0, t1)
@@ -57,9 +97,9 @@ def _gentle_zoom_progress(t: float, duration: float) -> float:
     return min(max(t / d, 0.0), 1.0)
 
 
-def _gentle_zoom_scale(t: float, duration: float) -> float:
+def _gentle_zoom_scale(t: float, duration: float, zoom_end: float) -> float:
     p = _gentle_zoom_progress(t, duration)
-    return GENTLE_ZOOM_SCALE_START + (GENTLE_ZOOM_SCALE_END - GENTLE_ZOOM_SCALE_START) * p
+    return 1.0 + (float(zoom_end) - 1.0) * p
 
 
 def _frame_rgb_uint8(frame: np.ndarray) -> np.ndarray:
@@ -98,7 +138,7 @@ def _center_crop_u8(arr: np.ndarray, target_h: int, target_w: int) -> np.ndarray
     return out
 
 
-def _gentle_zoom_frame_filter(duration: float, target_h: int, target_w: int):
+def _gentle_zoom_frame_filter(duration: float, target_h: int, target_w: int, zoom_end: float):
     """
     MoviePy 2 transform: func(get_frame, t) -> frame array (H,W,C) at constant size.
     Zoom by scaling the frame up then center-cropping back to target size.
@@ -108,7 +148,7 @@ def _gentle_zoom_frame_filter(duration: float, target_h: int, target_w: int):
         frame = get_frame(t)
         rgb = _frame_rgb_uint8(frame)
         h, w = rgb.shape[0], rgb.shape[1]
-        s = _gentle_zoom_scale(t, duration)
+        s = _gentle_zoom_scale(t, duration, zoom_end)
         nh = max(2, int(round(h * s)))
         nw = max(2, int(round(w * s)))
         img = Image.fromarray(rgb)
@@ -118,21 +158,27 @@ def _gentle_zoom_frame_filter(duration: float, target_h: int, target_w: int):
     return filt
 
 
-def _motion_gentle_zoom(clip, duration: float, width: int, height: int):
+def _motion_gentle_zoom(clip, duration: float, width: int, height: int, zoom_end: float):
     """
     Per-frame zoom (reliable in MoviePy 2.x). Output stays exactly width x height.
     """
     d = max(float(duration), MIN_SCENE_CLIP)
     th, tw = int(height), int(width)
-    filt = _gentle_zoom_frame_filter(d, th, tw)
+    filt = _gentle_zoom_frame_filter(d, th, tw, float(zoom_end))
     return clip.transform(filt, apply_to=[], keep_duration=True)
 
 
-def _motion_slow_pan(clip, duration: float, width: int, height: int, strength: float = 1.0):
+def _motion_slow_pan(
+    clip,
+    duration: float,
+    width: int,
+    height: int,
+    motion_intensity: str,
+    *,
+    strength_scale: float = 1.0,
+):
     d = max(float(duration), MIN_SCENE_CLIP)
-    pan_px = int(0.028 * width * max(0.2, min(strength, 1.5)))
-    nw = max(width + 1, int(width * 1.045))
-    nh = height
+    pan_px, nw, nh = _slow_pan_geometry(width, height, motion_intensity, strength_scale=strength_scale)
     z = None
     try:
         z = clip.resized(new_size=(nw, nh))
@@ -161,12 +207,14 @@ def _motion_slow_pan(clip, duration: float, width: int, height: int, strength: f
     return comp
 
 
-def _motion_ken_burns(clip, duration: float, width: int, height: int):
-    """Subtle combined zoom + pan (calm)."""
+def _motion_ken_burns(clip, duration: float, width: int, height: int, motion_intensity: str):
+    """Combined zoom + pan; pan strength follows intensity."""
     d = max(float(duration), MIN_SCENE_CLIP)
-    z = _motion_gentle_zoom(clip, d, width, height)
+    zoom_end = _zoom_end_for_intensity(motion_intensity)
+    z = _motion_gentle_zoom(clip, d, width, height, zoom_end)
     try:
-        return _motion_slow_pan(z, d, width, height, strength=0.55)
+        pan_scale = _ken_burns_pan_strength_scale(motion_intensity)
+        return _motion_slow_pan(z, d, width, height, motion_intensity, strength_scale=pan_scale)
     except Exception as exc:
         print(f"[motion] ken_burns: slow_pan failed, using zoom-only: {exc!r}")
         traceback.print_exc()
@@ -180,14 +228,17 @@ def _apply_motion_to_clip(
     height: int,
     duration: float,
     scene_index: Optional[int] = None,
+    motion_intensity: str = "subtle",
 ):
     me = (motion_effect or "none").strip().lower()
+    mi = _normalize_motion_intensity(motion_intensity)
+    zoom_end = _zoom_end_for_intensity(mi)
     if me in ("", "none"):
         d = max(float(duration), MIN_SCENE_CLIP)
         W, H = int(width), int(height)
         tag = _scene_log_tag(scene_index)
         print(
-            f"[motion] {tag}effect={me!r} duration={d:.3f}s target={W}x{H} "
+            f"[motion] {tag}effect={me!r} intensity={mi!r} (ignored) duration={d:.3f}s target={W}x{H} "
             f"applied=NO (static by choice)"
         )
         return clip
@@ -196,35 +247,38 @@ def _apply_motion_to_clip(
     tag = _scene_log_tag(scene_index)
     try:
         if me == "gentle_zoom":
-            out = _motion_gentle_zoom(clip, d, W, H)
+            out = _motion_gentle_zoom(clip, d, W, H, zoom_end)
             print(
-                f"[motion] {tag}effect={me!r} duration={d:.3f}s target={W}x{H} "
-                f"applied=YES method=frame_transform "
-                f"zoom={GENTLE_ZOOM_SCALE_START:.2f}->{GENTLE_ZOOM_SCALE_END:.2f}"
+                f"[motion] {tag}effect={me!r} intensity={mi!r} duration={d:.3f}s target={W}x{H} "
+                f"applied=YES method=frame_transform zoom=1.00->{zoom_end:.2f}"
             )
             return out
         if me == "slow_pan":
-            out = _motion_slow_pan(clip, d, W, H, strength=1.0)
+            out = _motion_slow_pan(clip, d, W, H, mi, strength_scale=1.0)
+            pan_px, nw, _ = _slow_pan_geometry(W, H, mi, strength_scale=1.0)
             print(
-                f"[motion] {tag}effect={me!r} duration={d:.3f}s target={W}x{H} "
-                f"applied=YES method=resize_position"
+                f"[motion] {tag}effect={me!r} intensity={mi!r} duration={d:.3f}s target={W}x{H} "
+                f"applied=YES method=resize_position pan_px={pan_px} canvas_w={nw}"
             )
             return out
         if me == "ken_burns":
-            out = _motion_ken_burns(clip, d, W, H)
+            out = _motion_ken_burns(clip, d, W, H, mi)
+            pan_px, nw, _ = _slow_pan_geometry(
+                W, H, mi, strength_scale=_ken_burns_pan_strength_scale(mi)
+            )
             print(
-                f"[motion] {tag}effect={me!r} duration={d:.3f}s target={W}x{H} "
-                f"applied=YES method=ken_burns (zoom then pan if supported)"
+                f"[motion] {tag}effect={me!r} intensity={mi!r} duration={d:.3f}s target={W}x{H} "
+                f"applied=YES method=ken_burns zoom=1.00->{zoom_end:.2f} pan_px≈{pan_px} canvas_w≈{nw}"
             )
             return out
         print(
-            f"[motion] {tag}effect={me!r} duration={d:.3f}s target={W}x{H} "
+            f"[motion] {tag}effect={me!r} intensity={mi!r} duration={d:.3f}s target={W}x{H} "
             f"applied=NO (unknown effect, static)"
         )
         return clip
     except Exception as exc:
         print(
-            f"[motion] {tag}effect={me!r} duration={d:.3f}s target={W}x{H} "
+            f"[motion] {tag}effect={me!r} intensity={mi!r} duration={d:.3f}s target={W}x{H} "
             f"applied=FALLBACK_STATIC reason={exc!r}"
         )
         traceback.print_exc()
@@ -426,6 +480,7 @@ def _frame_image_clip(
     image_fit_mode: str,
     motion_effect: str = "none",
     scene_index: Optional[int] = None,
+    motion_intensity: str = "subtle",
 ):
     base = ImageClip(img_path, duration=duration)
     fit_mode = (image_fit_mode or "fit").strip().lower()
@@ -483,7 +538,13 @@ def _frame_image_clip(
             static_clip = CompositeVideoClip([bg, fg], size=(width, height)).set_duration(duration)
 
     return _apply_motion_to_clip(
-        static_clip, motion_effect, width, height, duration, scene_index=scene_index
+        static_clip,
+        motion_effect,
+        width,
+        height,
+        duration,
+        scene_index=scene_index,
+        motion_intensity=motion_intensity,
     )
 
 
@@ -493,6 +554,7 @@ def _clips_from_images(
     aspect_ratio: str,
     image_fit_mode: str,
     motion_effect: str = "gentle_zoom",
+    motion_intensity: str = "subtle",
 ):
     clips = []
     width, height = _aspect_resolution(aspect_ratio)
@@ -507,6 +569,7 @@ def _clips_from_images(
                 image_fit_mode,
                 motion_effect=motion_effect,
                 scene_index=idx,
+                motion_intensity=motion_intensity,
             )
         )
     return clips
@@ -573,6 +636,7 @@ def render_video(
     background_music: str = "none",
     background_music_volume: float = 0.12,
     motion_effect: str = "gentle_zoom",
+    motion_intensity: str = "subtle",
 ) -> str:
     os.makedirs(output_dir, exist_ok=True)
     output_path = str(Path(output_dir) / filename)
@@ -585,9 +649,10 @@ def render_video(
         raise RuntimeError("render_video: no image clips were created")
 
     min_d, max_d = _duration_bounds(aspect_ratio)
+    mi = _normalize_motion_intensity(motion_intensity)
     print(
-        f"[render_video] motion_effect={motion_effect!r} n_scenes={len(image_paths)} "
-        f"aspect_ratio={aspect_ratio!r} image_fit_mode={image_fit_mode!r}"
+        f"[render_video] motion_effect={motion_effect!r} motion_intensity={mi!r} "
+        f"n_scenes={len(image_paths)} aspect_ratio={aspect_ratio!r} image_fit_mode={image_fit_mode!r}"
     )
 
     use_audio = audio_path and os.path.exists(audio_path) and os.path.getsize(audio_path) > 0
@@ -625,6 +690,7 @@ def render_video(
             aspect_ratio,
             image_fit_mode,
             motion_effect,
+            motion_intensity=mi,
         )
         video = concatenate_videoclips(clips, method="compose")
 
@@ -662,7 +728,9 @@ def render_video(
         f"min={min(durations):.2f} max={max(durations):.2f} sum={sum(durations):.2f} "
         f"(per-scene motion logs follow)"
     )
-    clips = _clips_from_images(image_paths, durations, aspect_ratio, image_fit_mode, motion_effect)
+    clips = _clips_from_images(
+        image_paths, durations, aspect_ratio, image_fit_mode, motion_effect, motion_intensity=mi
+    )
     video = concatenate_videoclips(clips, method="compose")
 
     if video.duration > max_d:
@@ -680,6 +748,7 @@ def render_video(
             image_fit_mode,
             motion_effect=motion_effect,
             scene_index=-1,
+            motion_intensity=mi,
         )
         video = concatenate_videoclips([video, pad_clip], method="compose")
         pad_clip.close()

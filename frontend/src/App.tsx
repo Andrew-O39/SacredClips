@@ -33,6 +33,8 @@ type BackgroundMusic = 'none' | 'peaceful_piano' | 'ambient_pad' | 'soft_strings
 
 type MotionEffect = 'none' | 'gentle_zoom' | 'slow_pan' | 'ken_burns'
 
+type MotionIntensity = 'subtle' | 'medium' | 'strong'
+
 function roundToHalfSecond(value: number): number {
   return Math.max(0.5, Math.round(value * 2) / 2)
 }
@@ -166,6 +168,7 @@ export const App: React.FC = () => {
   const [backgroundMusic, setBackgroundMusic] = useState<BackgroundMusic>('none')
   const [backgroundMusicVolume, setBackgroundMusicVolume] = useState(0.12)
   const [motionEffect, setMotionEffect] = useState<MotionEffect>('gentle_zoom')
+  const [motionIntensity, setMotionIntensity] = useState<MotionIntensity>('subtle')
   const [editedScenes, setEditedScenes] = useState<Scene[]>([])
   const [manualUploads, setManualUploads] = useState<Record<number, File | undefined>>({})
   const [manualImageModes, setManualImageModes] = useState<Record<number, ManualImageMode>>({})
@@ -258,6 +261,7 @@ export const App: React.FC = () => {
           background_music: backgroundMusic,
           background_music_volume: backgroundMusicVolume,
           motion_effect: motionEffect,
+          motion_intensity: motionIntensity,
         }),
       })
 
@@ -326,6 +330,7 @@ export const App: React.FC = () => {
       fd.append('background_music', backgroundMusic)
       fd.append('background_music_volume', String(backgroundMusicVolume))
       fd.append('motion_effect', motionEffect)
+      fd.append('motion_intensity', motionIntensity)
       fd.append('narration_source', manualNarrationSource)
       if (manualNarrationSource === 'upload' && manualAudioUpload) {
         fd.append('audio_upload', manualAudioUpload)
@@ -409,6 +414,7 @@ export const App: React.FC = () => {
           background_music: backgroundMusic,
           background_music_volume: backgroundMusicVolume,
           motion_effect: motionEffect,
+          motion_intensity: motionIntensity,
         }),
       })
 
@@ -1232,6 +1238,23 @@ export const App: React.FC = () => {
               </select>
               <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
                 Adds subtle motion to still images. Ken Burns gently zooms and pans across the image.
+              </p>
+            </div>
+
+            <div style={{ opacity: motionEffect === 'none' ? 0.55 : 1 }}>
+              <div className="field-label">Motion intensity</div>
+              <select
+                className="select input-full"
+                value={motionIntensity}
+                disabled={motionEffect === 'none'}
+                onChange={e => setMotionIntensity(e.target.value as MotionIntensity)}
+              >
+                <option value="subtle">Subtle</option>
+                <option value="medium">Medium</option>
+                <option value="strong">Strong</option>
+              </select>
+              <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
+                Controls how noticeable the image movement feels.
               </p>
             </div>
 

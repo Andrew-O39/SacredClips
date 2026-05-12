@@ -22,6 +22,8 @@ BackgroundMusic = Literal[
 
 MotionEffect = Literal["none", "gentle_zoom", "slow_pan", "ken_burns"]
 
+MotionIntensity = Literal["subtle", "medium", "strong"]
+
 
 class Scene(BaseModel):
     index: int = Field(ge=1)
@@ -42,6 +44,7 @@ class VideoRequest(BaseModel):
     background_music: BackgroundMusic = "none"
     background_music_volume: float = Field(default=0.12, ge=0.0, le=0.5)
     motion_effect: MotionEffect = "gentle_zoom"
+    motion_intensity: MotionIntensity = "subtle"
 
 
 class ManualVideoRequest(BaseModel):
@@ -62,6 +65,7 @@ class ManualVideoRequest(BaseModel):
     background_music: BackgroundMusic = "none"
     background_music_volume: float = Field(default=0.12, ge=0.0, le=0.5)
     motion_effect: MotionEffect = "gentle_zoom"
+    motion_intensity: MotionIntensity = "subtle"
 
 
 class VideoResponse(BaseModel):
