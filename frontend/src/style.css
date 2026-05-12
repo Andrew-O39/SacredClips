@@ -482,12 +482,26 @@ body {
   border-radius: 1rem;
   overflow: hidden;
   border: 1px solid rgba(148, 163, 184, 0.5);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: #020617;
 }
 
-video {
-  width: 100%;
+.video-wrapper video {
+  width: auto;
+  max-width: min(100%, 900px);
+  max-height: 70vh;
+  height: auto;
+  object-fit: contain;
   display: block;
-  background: black;
+  background: #000;
+  border-radius: 0.35rem;
+}
+
+.music-preview-audio {
+  width: 100%;
+  margin-top: 0.55rem;
 }
 
 .small-label {

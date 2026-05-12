@@ -11,6 +11,7 @@ from pydantic import TypeAdapter, ValidationError
 from . import config
 from .schemas import (
     AspectRatio,
+    BackgroundMusic,
     ImageFitMode,
     ManualVideoRequest,
     Scene,
@@ -42,6 +43,11 @@ app.add_middleware(
 media_root = Path(config.BASE_OUTPUT_DIR).resolve()
 media_root.mkdir(parents=True, exist_ok=True)
 app.mount("/media", StaticFiles(directory=str(media_root)), name="media")
+
+# Static royalty-free music previews and other bundled assets (served as /assets/...)
+_assets_root = Path(__file__).resolve().parent.parent / "assets"
+_assets_root.mkdir(parents=True, exist_ok=True)
+app.mount("/assets", StaticFiles(directory=str(_assets_root)), name="assets")
 
 
 @app.get("/health")
@@ -77,6 +83,7 @@ def _prepare_topic_dirs(topic: str) -> tuple[Path, Path, Path, Path]:
 _visual_style_adapter = TypeAdapter(VisualStyle)
 _aspect_ratio_adapter = TypeAdapter(AspectRatio)
 _image_fit_mode_adapter = TypeAdapter(ImageFitMode)
+_background_music_adapter = TypeAdapter(BackgroundMusic)
 
 
 def _normalize_visual_style(value: object) -> VisualStyle:
@@ -117,6 +124,23 @@ def _normalize_image_fit_mode(value: object) -> ImageFitMode:
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"error": "Invalid image_fit_mode", "detail": exc.errors()},
         ) from exc
+
+
+def _normalize_background_music(value: object) -> BackgroundMusic:
+    try:
+        return _background_music_adapter.validate_python(value)
+    except ValidationError:
+        return "none"
+
+
+def _clamp_background_music_volume(raw: object) -> float:
+    if raw is None or raw == "":
+        return 0.12
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 0.12
+    return max(0.0, min(0.5, v))
 
 
 def _sort_scenes(scenes: List[Scene]) -> List[Scene]:
@@ -161,6 +185,8 @@ def _finalize_video_response(
     used_ai_flag: bool,
     aspect_ratio: AspectRatio,
     image_fit_mode: str = "fit",
+    background_music: BackgroundMusic = "none",
+    background_music_volume: float = 0.12,
 ) -> VideoResponse:
     scene_durations = [s.duration_seconds for s in scenes_ordered]
     video_path = video_service.render_video(
@@ -171,6 +197,8 @@ def _finalize_video_response(
         filename="final_video.mp4",
         aspect_ratio=aspect_ratio,
         image_fit_mode=image_fit_mode,
+        background_music=background_music,
+        background_music_volume=background_music_volume,
     )
     abs_video_path = Path(video_path).resolve()
     rel_to_media = abs_video_path.relative_to(media_root)
@@ -219,6 +247,8 @@ def _regenerate_from_manual_request(req: ManualVideoRequest) -> VideoResponse:
         used_ai_flag=False,
         aspect_ratio=req.aspect_ratio,
         image_fit_mode=req.image_fit_mode,
+        background_music=req.background_music,
+        background_music_volume=req.background_music_volume,
     )
 
 
@@ -236,6 +266,8 @@ def generate_video(req: VideoRequest):
         visual_style=req.visual_style,
         aspect_ratio=req.aspect_ratio,
         image_fit_mode=req.image_fit_mode,
+        background_music=req.background_music,
+        background_music_volume=req.background_music_volume,
     )
     script_text, scenes_raw, used_ai = script_service.generate_script(req_for_script)
     scenes_ordered = [_strip_scene_for_render(s) for s in _sort_scenes(scenes_raw)]
@@ -269,6 +301,8 @@ def generate_video(req: VideoRequest):
         used_ai_flag=used_ai,
         aspect_ratio=req.aspect_ratio,
         image_fit_mode=req.image_fit_mode,
+        background_music=req.background_music,
+        background_music_volume=req.background_music_volume,
     )
 
 
@@ -353,6 +387,9 @@ async def manual_video(request: Request):
         image_fit_mode = _normalize_image_fit_mode("fill" if aspect_ratio == "9:16" else "fit")
     else:
         image_fit_mode = _normalize_image_fit_mode(ifm_raw)
+
+    background_music = _normalize_background_music(form.get("background_music"))
+    background_music_volume = _clamp_background_music_volume(form.get("background_music_volume"))
 
     _, audio_dir, images_dir, videos_dir = _prepare_topic_dirs(topic)
     scenes_ordered = [_strip_scene_for_render(s) for s in _sort_scenes(scene_models)]
@@ -532,6 +569,8 @@ async def manual_video(request: Request):
         used_ai_flag=False,
         aspect_ratio=aspect_ratio,
         image_fit_mode=image_fit_mode,
+        background_music=background_music,
+        background_music_volume=background_music_volume,
     )
 
 

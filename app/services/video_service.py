@@ -6,6 +6,16 @@ from moviepy import AudioFileClip, ColorClip, CompositeVideoClip, ImageClip, con
 
 MIN_SCENE_CLIP = 0.25
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_MUSIC_DIR = _PROJECT_ROOT / "assets" / "music"
+
+_MUSIC_FILENAMES = {
+    "peaceful_piano": "peaceful_piano.mp3",
+    "ambient_pad": "ambient_pad.mp3",
+    "soft_strings": "soft_strings.mp3",
+    "gentle_choir": "gentle_choir.mp3",
+}
+
 ASPECT_RESOLUTION: dict[str, Tuple[int, int]] = {
     "16:9": (1920, 1080),
     "9:16": (1080, 1920),
@@ -24,6 +34,161 @@ def _subclip_compat(clip, t0: float, t1: float):
         return clip.subclipped(t0, t1)
     except AttributeError:
         return clip.subclip(t0, t1)
+
+
+def _concatenate_audioclips_safe(clips: List):
+    if not clips:
+        raise ValueError("concatenate_audioclips_safe: empty clips")
+    if len(clips) == 1:
+        return clips[0]
+    try:
+        from moviepy import concatenate_audioclips
+
+        return concatenate_audioclips(clips)
+    except Exception:
+        pass
+    try:
+        from moviepy.audio.AudioClip import concatenate_audioclips as cac
+
+        return cac(clips)
+    except Exception as exc:
+        raise RuntimeError(f"concatenate_audioclips unavailable: {exc}") from exc
+
+
+def _volume_scale_compat(clip, factor: float):
+    try:
+        return clip.with_volume_scaled(factor)
+    except AttributeError:
+        try:
+            return clip.volumex(factor)
+        except AttributeError:
+            return clip
+
+
+def _audio_fade_compat(clip, fade_in: float, fade_out: float):
+    fi = max(0.0, float(fade_in))
+    fo = max(0.0, float(fade_out))
+    if fi <= 1e-6 and fo <= 1e-6:
+        return clip
+    try:
+        out = clip
+        if fi > 1e-6:
+            out = out.audio_fadein(fi)
+        if fo > 1e-6:
+            out = out.audio_fadeout(fo)
+        return out
+    except AttributeError:
+        return clip
+
+
+def _resolve_music_path(background_music: str) -> str | None:
+    if not background_music or background_music == "none":
+        return None
+    fn = _MUSIC_FILENAMES.get(background_music)
+    if not fn:
+        return None
+    p = _MUSIC_DIR / fn
+    if not p.is_file():
+        print(f"[render_video] Background music file missing (skipping music): {p}")
+        return None
+    return str(p)
+
+
+def _loop_music_to_duration(src: AudioFileClip, target_duration: float) -> AudioFileClip:
+    md = float(src.duration or 0)
+    td = float(target_duration)
+    if md <= 0.01:
+        return src
+    if md >= td - 1e-6:
+        return _subclip_compat(src, 0, td)
+
+    pieces = []
+    remain = td
+    while remain > 1e-5:
+        seg = min(md, remain)
+        pieces.append(_subclip_compat(src, 0, seg))
+        remain -= seg
+    if len(pieces) == 1:
+        return pieces[0]
+    return _concatenate_audioclips_safe(pieces)
+
+
+def _build_music_clip(music_path: str, target_duration: float, volume: float) -> AudioFileClip | None:
+    try:
+        base = AudioFileClip(music_path)
+    except Exception as e:
+        print(f"[render_video] Could not load background music '{music_path}': {e}")
+        return None
+
+    try:
+        looped = _loop_music_to_duration(base, target_duration)
+    except Exception as e:
+        print(f"[render_video] Could not loop background music: {e}")
+        try:
+            base.close()
+        except Exception:
+            pass
+        return None
+
+    td = float(target_duration)
+    fade_d = min(1.5, max(0.1, td / 8.0))
+    faded = _audio_fade_compat(looped, fade_d, fade_d)
+    scaled = _volume_scale_compat(faded, float(volume))
+
+    try:
+        dur_now = float(scaled.duration)
+        if dur_now > td + 0.08:
+            scaled = _subclip_compat(scaled, 0, td)
+    except Exception:
+        pass
+
+    return scaled
+
+
+def _compose_final_audio(
+    narration_clip: AudioFileClip | None,
+    video_duration: float,
+    background_music: str,
+    background_music_volume: float,
+) -> tuple[AudioFileClip | None, bool]:
+    """
+    Returns (audio_clip_or_none, is_composite).
+    is_composite=True means narration is embedded and should not be closed separately.
+    """
+    vd = max(0.01, float(video_duration))
+    vol = float(background_music_volume)
+    music_path = _resolve_music_path(background_music)
+
+    music_clip: AudioFileClip | None = None
+    if (
+        music_path
+        and background_music != "none"
+        and vol > 1e-9
+    ):
+        music_clip = _build_music_clip(music_path, vd, vol)
+
+    if narration_clip is not None and music_clip is not None:
+        try:
+            from moviepy import CompositeAudioClip as CompositeAudioClipType
+        except ImportError:
+            from moviepy.audio.AudioClip import CompositeAudioClip as CompositeAudioClipType  # type: ignore
+
+        try:
+            mixed = CompositeAudioClipType([narration_clip, music_clip]).with_duration(vd)
+        except AttributeError:
+            try:
+                mixed = CompositeAudioClipType([narration_clip, music_clip]).set_duration(vd)
+            except AttributeError:
+                mixed = CompositeAudioClipType([narration_clip, music_clip])
+        return mixed, True
+
+    if narration_clip is not None:
+        return narration_clip, False
+
+    if music_clip is not None:
+        return music_clip, False
+
+    return None, False
 
 
 def _normalize_durations(scene_durations: List[float]) -> List[float]:
@@ -137,6 +302,47 @@ def _scale_durations_when_no_audio(scene_durations: List[float], aspect_ratio: s
     return _scale_scene_durations_to_target(durations, max_d)
 
 
+def _attach_audio_and_write(
+    video,
+    clips: List,
+    output_path: str,
+    narration_clip: AudioFileClip | None,
+    background_music: str,
+    background_music_volume: float,
+):
+    vd = float(video.duration)
+    final_audio, _ = _compose_final_audio(
+        narration_clip,
+        vd,
+        background_music,
+        background_music_volume,
+    )
+
+    if final_audio is not None:
+        try:
+            video = video.with_audio(final_audio)
+        except AttributeError:
+            video = video.set_audio(final_audio)
+
+    video.write_videofile(output_path, fps=24, codec="libx264", audio_codec="aac")
+
+    for c in clips:
+        try:
+            c.close()
+        except Exception:
+            pass
+    try:
+        video.close()
+    except Exception:
+        pass
+
+    if final_audio is not None:
+        try:
+            final_audio.close()
+        except Exception:
+            pass
+
+
 def render_video(
     image_paths: List[str],
     audio_path: str,
@@ -145,6 +351,8 @@ def render_video(
     filename: str = "final_video.mp4",
     aspect_ratio: str = "16:9",
     image_fit_mode: str = "fit",
+    background_music: str = "none",
+    background_music_volume: float = 0.12,
 ) -> str:
     os.makedirs(output_dir, exist_ok=True)
     output_path = str(Path(output_dir) / filename)
@@ -196,18 +404,22 @@ def render_video(
         except Exception as e_sync:
             print(f"[render_video] sync trim fallback: {e_sync}")
 
-        try:
-            video = video.with_audio(audio_clip)
-        except AttributeError:
-            video = video.set_audio(audio_clip)
-
-        video.write_videofile(output_path, fps=24, codec="libx264", audio_codec="aac")
-
-        for c in clips:
-            c.close()
-        video.close()
-        audio_clip.close()
+        _attach_audio_and_write(
+            video,
+            clips,
+            output_path,
+            audio_clip,
+            background_music,
+            background_music_volume,
+        )
         return output_path
+
+    if audio_clip is not None:
+        try:
+            audio_clip.close()
+        except Exception:
+            pass
+        audio_clip = None
 
     durations = _scale_durations_when_no_audio(scene_durations, aspect_ratio)
     clips = _clips_from_images(image_paths, durations, aspect_ratio, image_fit_mode)
@@ -224,10 +436,12 @@ def render_video(
         video = concatenate_videoclips([video, pad_clip], method="compose")
         pad_clip.close()
 
-    video.write_videofile(output_path, fps=24, codec="libx264", audio_codec="aac")
-
-    for c in clips:
-        c.close()
-    video.close()
-
+    _attach_audio_and_write(
+        video,
+        clips,
+        output_path,
+        None,
+        background_music,
+        background_music_volume,
+    )
     return output_path

@@ -29,6 +29,8 @@ type ManualNarrationSource = 'tts' | 'upload'
 type GenerationProfile = 'ai' | 'manual_tts' | 'manual_upload' | 'regenerate'
 type ImageFitMode = 'fit' | 'fill'
 
+type BackgroundMusic = 'none' | 'peaceful_piano' | 'ambient_pad' | 'soft_strings' | 'gentle_choir'
+
 function roundToHalfSecond(value: number): number {
   return Math.max(0.5, Math.round(value * 2) / 2)
 }
@@ -113,6 +115,22 @@ function formatAudioSeconds(sec: number): string {
   return `${sec.toFixed(2)} s`
 }
 
+const BACKGROUND_MUSIC_PREVIEW_FILES: Record<
+  Exclude<BackgroundMusic, 'none'>,
+  string
+> = {
+  peaceful_piano: 'peaceful_piano.mp3',
+  ambient_pad: 'ambient_pad.mp3',
+  soft_strings: 'soft_strings.mp3',
+  gentle_choir: 'gentle_choir.mp3',
+}
+
+function backgroundMusicPreviewUrl(choice: BackgroundMusic): string | null {
+  if (choice === 'none') return null
+  const file = BACKGROUND_MUSIC_PREVIEW_FILES[choice]
+  return `${API_BASE_URL}/assets/music/${file}`
+}
+
 type VideoResponse = {
   video_path: string
   video_url: string
@@ -143,6 +161,8 @@ export const App: React.FC = () => {
   const [duration, setDuration] = useState(180)
   const [visualStyle, setVisualStyle] = useState<VisualStyle>('Classical sacred art')
   const [imageFitMode, setImageFitMode] = useState<ImageFitMode>('fit')
+  const [backgroundMusic, setBackgroundMusic] = useState<BackgroundMusic>('none')
+  const [backgroundMusicVolume, setBackgroundMusicVolume] = useState(0.12)
   const [editedScenes, setEditedScenes] = useState<Scene[]>([])
   const [manualUploads, setManualUploads] = useState<Record<number, File | undefined>>({})
   const [manualImageModes, setManualImageModes] = useState<Record<number, ManualImageMode>>({})
@@ -150,6 +170,7 @@ export const App: React.FC = () => {
   const [manualAudioUpload, setManualAudioUpload] = useState<File | undefined>(undefined)
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const musicPreviewRef = useRef<HTMLAudioElement | null>(null)
   const [uploadedAudioUrl, setUploadedAudioUrl] = useState('')
   const [uploadedAudioDuration, setUploadedAudioDuration] = useState(0)
   const [uploadedAudioCurrentTime, setUploadedAudioCurrentTime] = useState(0)
@@ -231,6 +252,8 @@ export const App: React.FC = () => {
           visual_style: visualStyle,
           aspect_ratio: aspectRatio,
           image_fit_mode: imageFitMode,
+          background_music: backgroundMusic,
+          background_music_volume: backgroundMusicVolume,
         }),
       })
 
@@ -296,6 +319,8 @@ export const App: React.FC = () => {
       fd.append('style', style)
       fd.append('aspect_ratio', aspectRatio)
       fd.append('image_fit_mode', imageFitMode)
+      fd.append('background_music', backgroundMusic)
+      fd.append('background_music_volume', String(backgroundMusicVolume))
       fd.append('narration_source', manualNarrationSource)
       if (manualNarrationSource === 'upload' && manualAudioUpload) {
         fd.append('audio_upload', manualAudioUpload)
@@ -376,6 +401,8 @@ export const App: React.FC = () => {
           visual_style: visualStyle,
           aspect_ratio: aspectRatio,
           image_fit_mode: imageFitMode,
+          background_music: backgroundMusic,
+          background_music_volume: backgroundMusicVolume,
         }),
       })
 
@@ -696,6 +723,12 @@ export const App: React.FC = () => {
 
     return () => window.clearInterval(id)
   }, [loading, generationProfile])
+
+  useEffect(() => {
+    const el = musicPreviewRef.current
+    if (!el) return
+    el.volume = Math.min(1, Math.max(0, backgroundMusicVolume))
+  }, [backgroundMusicVolume, backgroundMusic])
 
   useEffect(() => {
     const shouldPreview =
@@ -1131,6 +1164,52 @@ export const App: React.FC = () => {
               <p className="footer-hint" style={{ marginTop: '0.2rem' }}>
                 Fill screen / crop: fills the frame, may crop image edges.
               </p>
+            </div>
+
+            <div>
+              <div className="field-label">Background music</div>
+              <select
+                className="select input-full"
+                value={backgroundMusic}
+                onChange={e => setBackgroundMusic(e.target.value as BackgroundMusic)}
+              >
+                <option value="none">None</option>
+                <option value="peaceful_piano">Peaceful piano</option>
+                <option value="ambient_pad">Ambient pad</option>
+                <option value="soft_strings">Soft strings</option>
+                <option value="gentle_choir">Gentle choir</option>
+              </select>
+              {backgroundMusic !== 'none' && (
+                <>
+                  <div className="field-label" style={{ marginTop: '0.75rem' }}>
+                    Music volume ({Math.round(backgroundMusicVolume * 100)}%)
+                  </div>
+                  <div className="range-row">
+                    <div className="range-input">
+                      <input
+                        type="range"
+                        min={0.02}
+                        max={0.3}
+                        step={0.01}
+                        value={backgroundMusicVolume}
+                        onChange={e => setBackgroundMusicVolume(Number(e.target.value))}
+                        style={{ width: '100%' }}
+                      />
+                    </div>
+                  </div>
+                  <p className="footer-hint">Keep volume low so narration remains clear.</p>
+                  <audio
+                    ref={musicPreviewRef}
+                    key={backgroundMusic}
+                    className="music-preview-audio"
+                    controls
+                    src={backgroundMusicPreviewUrl(backgroundMusic) ?? undefined}
+                  />
+                  <p className="footer-hint">
+                    Preview uses the selected volume. Final video will mix music under narration.
+                  </p>
+                </>
+              )}
             </div>
 
             <div>

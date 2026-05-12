@@ -12,6 +12,14 @@ VisualStyle = Literal[
 AspectRatio = Literal["16:9", "9:16", "1:1"]
 ImageFitMode = Literal["fit", "fill"]
 
+BackgroundMusic = Literal[
+    "none",
+    "peaceful_piano",
+    "ambient_pad",
+    "soft_strings",
+    "gentle_choir",
+]
+
 
 class Scene(BaseModel):
     index: int = Field(ge=1)
@@ -29,6 +37,8 @@ class VideoRequest(BaseModel):
     visual_style: VisualStyle = "Classical sacred art"
     aspect_ratio: AspectRatio = "16:9"
     image_fit_mode: ImageFitMode = "fit"
+    background_music: BackgroundMusic = "none"
+    background_music_volume: float = Field(default=0.12, ge=0.0, le=0.5)
 
 
 class ManualVideoRequest(BaseModel):
@@ -46,6 +56,8 @@ class ManualVideoRequest(BaseModel):
     visual_style: VisualStyle = "Classical sacred art"
     aspect_ratio: AspectRatio = "16:9"
     image_fit_mode: ImageFitMode = "fit"
+    background_music: BackgroundMusic = "none"
+    background_music_volume: float = Field(default=0.12, ge=0.0, le=0.5)
 
 
 class VideoResponse(BaseModel):
