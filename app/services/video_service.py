@@ -1,10 +1,18 @@
 import os
+import traceback
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
+
+import numpy as np
+from PIL import Image
 
 from moviepy import AudioFileClip, ColorClip, CompositeVideoClip, ImageClip, concatenate_videoclips
 
 MIN_SCENE_CLIP = 0.25
+
+# Gentle zoom: visible but still restrained (was 1.06; MoviePy time-resize often looked static).
+GENTLE_ZOOM_SCALE_START = 1.0
+GENTLE_ZOOM_SCALE_END = 1.12
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _MUSIC_DIR = _PROJECT_ROOT / "assets" / "music"
@@ -29,11 +37,198 @@ ASPECT_DURATION_BOUNDS: dict[str, Tuple[float, float]] = {
 }
 
 
+def _scene_log_tag(scene_index: Optional[int]) -> str:
+    if scene_index is None:
+        return ""
+    if scene_index < 0:
+        return "scene=pad "
+    return f"scene={scene_index} "
+
+
 def _subclip_compat(clip, t0: float, t1: float):
     try:
         return clip.subclipped(t0, t1)
     except AttributeError:
         return clip.subclip(t0, t1)
+
+
+def _gentle_zoom_progress(t: float, duration: float) -> float:
+    d = max(float(duration), MIN_SCENE_CLIP)
+    return min(max(t / d, 0.0), 1.0)
+
+
+def _gentle_zoom_scale(t: float, duration: float) -> float:
+    p = _gentle_zoom_progress(t, duration)
+    return GENTLE_ZOOM_SCALE_START + (GENTLE_ZOOM_SCALE_END - GENTLE_ZOOM_SCALE_START) * p
+
+
+def _frame_rgb_uint8(frame: np.ndarray) -> np.ndarray:
+    """Normalize MoviePy frame to HxWx3 uint8 RGB."""
+    if frame is None or frame.size == 0:
+        raise ValueError("empty frame")
+    if frame.ndim == 2:
+        arr = np.stack([frame, frame, frame], axis=-1)
+    else:
+        arr = frame[:, :, :3] if frame.shape[2] >= 3 else np.repeat(frame[:, :, :1], 3, axis=2)
+    if arr.dtype == np.uint8:
+        return np.ascontiguousarray(arr)
+    a = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
+    mx = float(np.max(a)) if a.size else 0.0
+    if mx <= 1.0 + 1e-5:
+        out = (np.clip(a, 0.0, 1.0) * 255.0).astype(np.uint8)
+    else:
+        out = np.clip(a, 0.0, 255.0).astype(np.uint8)
+    return np.ascontiguousarray(out)
+
+
+def _center_crop_u8(arr: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
+    """Crop arr (HxWxC) to target_h x target_w from center; pad with zeros if too small."""
+    h, w = int(arr.shape[0]), int(arr.shape[1])
+    c = int(arr.shape[2]) if arr.ndim >= 3 else 1
+    if h >= target_h and w >= target_w:
+        y0 = max(0, (h - target_h) // 2)
+        x0 = max(0, (w - target_w) // 2)
+        return np.ascontiguousarray(arr[y0 : y0 + target_h, x0 : x0 + target_w])
+    out = np.zeros((target_h, target_w, c), dtype=np.uint8)
+    copy_h = min(h, target_h)
+    copy_w = min(w, target_w)
+    y0o = (target_h - copy_h) // 2
+    x0o = (target_w - copy_w) // 2
+    out[y0o : y0o + copy_h, x0o : x0o + copy_w] = arr[:copy_h, :copy_w]
+    return out
+
+
+def _gentle_zoom_frame_filter(duration: float, target_h: int, target_w: int):
+    """
+    MoviePy 2 transform: func(get_frame, t) -> frame array (H,W,C) at constant size.
+    Zoom by scaling the frame up then center-cropping back to target size.
+    """
+
+    def filt(get_frame, t: float) -> np.ndarray:
+        frame = get_frame(t)
+        rgb = _frame_rgb_uint8(frame)
+        h, w = rgb.shape[0], rgb.shape[1]
+        s = _gentle_zoom_scale(t, duration)
+        nh = max(2, int(round(h * s)))
+        nw = max(2, int(round(w * s)))
+        img = Image.fromarray(rgb)
+        scaled = np.asarray(img.resize((nw, nh), Image.Resampling.LANCZOS), dtype=np.uint8)
+        return _center_crop_u8(scaled, target_h, target_w)
+
+    return filt
+
+
+def _motion_gentle_zoom(clip, duration: float, width: int, height: int):
+    """
+    Per-frame zoom (reliable in MoviePy 2.x). Output stays exactly width x height.
+    """
+    d = max(float(duration), MIN_SCENE_CLIP)
+    th, tw = int(height), int(width)
+    filt = _gentle_zoom_frame_filter(d, th, tw)
+    return clip.transform(filt, apply_to=[], keep_duration=True)
+
+
+def _motion_slow_pan(clip, duration: float, width: int, height: int, strength: float = 1.0):
+    d = max(float(duration), MIN_SCENE_CLIP)
+    pan_px = int(0.028 * width * max(0.2, min(strength, 1.5)))
+    nw = max(width + 1, int(width * 1.045))
+    nh = height
+    z = None
+    try:
+        z = clip.resized(new_size=(nw, nh))
+    except Exception:
+        try:
+            z = clip.resized(width=nw, height=nh)
+        except Exception:
+            try:
+                z = clip.resize(width=nw, height=nh)
+            except Exception:
+                raise RuntimeError("slow_pan: resize unsupported") from None
+
+    def pos_fn(t: float):
+        p = min(max(t / d, 0.0), 1.0)
+        x = -pan_px * p
+        y = (height - nh) / 2
+        return (x, y)
+
+    bg = ColorClip(size=(width, height), color=(18, 18, 24), duration=d)
+    try:
+        fg = z.with_position(pos_fn)
+        comp = CompositeVideoClip([bg, fg], size=(width, height)).with_duration(d)
+    except AttributeError:
+        fg = z.set_position(pos_fn)
+        comp = CompositeVideoClip([bg, fg], size=(width, height)).set_duration(d)
+    return comp
+
+
+def _motion_ken_burns(clip, duration: float, width: int, height: int):
+    """Subtle combined zoom + pan (calm)."""
+    d = max(float(duration), MIN_SCENE_CLIP)
+    z = _motion_gentle_zoom(clip, d, width, height)
+    try:
+        return _motion_slow_pan(z, d, width, height, strength=0.55)
+    except Exception as exc:
+        print(f"[motion] ken_burns: slow_pan failed, using zoom-only: {exc!r}")
+        traceback.print_exc()
+        return z
+
+
+def _apply_motion_to_clip(
+    clip,
+    motion_effect: str,
+    width: int,
+    height: int,
+    duration: float,
+    scene_index: Optional[int] = None,
+):
+    me = (motion_effect or "none").strip().lower()
+    if me in ("", "none"):
+        d = max(float(duration), MIN_SCENE_CLIP)
+        W, H = int(width), int(height)
+        tag = _scene_log_tag(scene_index)
+        print(
+            f"[motion] {tag}effect={me!r} duration={d:.3f}s target={W}x{H} "
+            f"applied=NO (static by choice)"
+        )
+        return clip
+    d = max(float(duration), MIN_SCENE_CLIP)
+    W, H = int(width), int(height)
+    tag = _scene_log_tag(scene_index)
+    try:
+        if me == "gentle_zoom":
+            out = _motion_gentle_zoom(clip, d, W, H)
+            print(
+                f"[motion] {tag}effect={me!r} duration={d:.3f}s target={W}x{H} "
+                f"applied=YES method=frame_transform "
+                f"zoom={GENTLE_ZOOM_SCALE_START:.2f}->{GENTLE_ZOOM_SCALE_END:.2f}"
+            )
+            return out
+        if me == "slow_pan":
+            out = _motion_slow_pan(clip, d, W, H, strength=1.0)
+            print(
+                f"[motion] {tag}effect={me!r} duration={d:.3f}s target={W}x{H} "
+                f"applied=YES method=resize_position"
+            )
+            return out
+        if me == "ken_burns":
+            out = _motion_ken_burns(clip, d, W, H)
+            print(
+                f"[motion] {tag}effect={me!r} duration={d:.3f}s target={W}x{H} "
+                f"applied=YES method=ken_burns (zoom then pan if supported)"
+            )
+            return out
+        print(
+            f"[motion] {tag}effect={me!r} duration={d:.3f}s target={W}x{H} "
+            f"applied=NO (unknown effect, static)"
+        )
+        return clip
+    except Exception as exc:
+        print(
+            f"[motion] {tag}effect={me!r} duration={d:.3f}s target={W}x{H} "
+            f"applied=FALLBACK_STATIC reason={exc!r}"
+        )
+        traceback.print_exc()
+    return clip
 
 
 def _concatenate_audioclips_safe(clips: List):
@@ -223,9 +418,18 @@ def _duration_bounds(aspect_ratio: str) -> Tuple[float, float]:
     return ASPECT_DURATION_BOUNDS.get(aspect_ratio, ASPECT_DURATION_BOUNDS["16:9"])
 
 
-def _frame_image_clip(img_path: str, duration: float, width: int, height: int, image_fit_mode: str):
+def _frame_image_clip(
+    img_path: str,
+    duration: float,
+    width: int,
+    height: int,
+    image_fit_mode: str,
+    motion_effect: str = "none",
+    scene_index: Optional[int] = None,
+):
     base = ImageClip(img_path, duration=duration)
     fit_mode = (image_fit_mode or "fit").strip().lower()
+    static_clip = None
 
     if fit_mode == "fill":
         # Cover mode: preserve aspect ratio, then center-crop to frame.
@@ -233,50 +437,54 @@ def _frame_image_clip(img_path: str, duration: float, width: int, height: int, i
         src_h = float(base.h)
         if src_w <= 0 or src_h <= 0:
             try:
-                return base.resized(width=width, height=height)
+                static_clip = base.resized(width=width, height=height)
             except AttributeError:
-                return base.resize(width=width, height=height)
+                static_clip = base.resize(width=width, height=height)
+        else:
+            scale = max(width / src_w, height / src_h)
+            target_w = max(1, int(round(src_w * scale)))
+            target_h = max(1, int(round(src_h * scale)))
+            try:
+                scaled = base.resized(width=target_w, height=target_h)
+            except AttributeError:
+                scaled = base.resize(width=target_w, height=target_h)
 
-        scale = max(width / src_w, height / src_h)
-        target_w = max(1, int(round(src_w * scale)))
-        target_h = max(1, int(round(src_h * scale)))
+            x1 = max(0, int((target_w - width) / 2))
+            y1 = max(0, int((target_h - height) / 2))
+            x2 = x1 + width
+            y2 = y1 + height
+            try:
+                static_clip = scaled.cropped(x1=x1, y1=y1, x2=x2, y2=y2)
+            except AttributeError:
+                static_clip = scaled.crop(x1=x1, y1=y1, x2=x2, y2=y2)
+
+    if static_clip is None:
+        # fit mode: keep full image and pad
         try:
-            scaled = base.resized(width=target_w, height=target_h)
+            fg = base.resized(width=width)
         except AttributeError:
-            scaled = base.resize(width=target_w, height=target_h)
+            fg = base.resize(width=width)
 
-        x1 = max(0, int((target_w - width) / 2))
-        y1 = max(0, int((target_h - height) / 2))
-        x2 = x1 + width
-        y2 = y1 + height
+        if fg.h > height:
+            try:
+                fg = base.resized(height=height)
+            except AttributeError:
+                fg = base.resize(height=height)
+
+        bg = ColorClip(size=(width, height), color=(18, 18, 24), duration=duration)
+        x = (width - fg.w) / 2
+        y = (height - fg.h) / 2
+
         try:
-            return scaled.cropped(x1=x1, y1=y1, x2=x2, y2=y2)
+            fg = fg.with_position((x, y))
+            static_clip = CompositeVideoClip([bg, fg], size=(width, height)).with_duration(duration)
         except AttributeError:
-            return scaled.crop(x1=x1, y1=y1, x2=x2, y2=y2)
+            fg = fg.set_position((x, y))
+            static_clip = CompositeVideoClip([bg, fg], size=(width, height)).set_duration(duration)
 
-    # fit mode: keep full image and pad
-    try:
-        fg = base.resized(width=width)
-    except AttributeError:
-        fg = base.resize(width=width)
-
-    if fg.h > height:
-        try:
-            fg = base.resized(height=height)
-        except AttributeError:
-            fg = base.resize(height=height)
-
-    bg = ColorClip(size=(width, height), color=(18, 18, 24), duration=duration)
-    x = (width - fg.w) / 2
-    y = (height - fg.h) / 2
-
-    try:
-        fg = fg.with_position((x, y))
-        comp = CompositeVideoClip([bg, fg], size=(width, height)).with_duration(duration)
-    except AttributeError:
-        fg = fg.set_position((x, y))
-        comp = CompositeVideoClip([bg, fg], size=(width, height)).set_duration(duration)
-    return comp
+    return _apply_motion_to_clip(
+        static_clip, motion_effect, width, height, duration, scene_index=scene_index
+    )
 
 
 def _clips_from_images(
@@ -284,12 +492,23 @@ def _clips_from_images(
     durations: List[float],
     aspect_ratio: str,
     image_fit_mode: str,
+    motion_effect: str = "gentle_zoom",
 ):
     clips = []
     width, height = _aspect_resolution(aspect_ratio)
-    for img_path, duration in zip(image_paths, durations):
+    for idx, (img_path, duration) in enumerate(zip(image_paths, durations), start=1):
         safe_duration = max(float(duration), MIN_SCENE_CLIP)
-        clips.append(_frame_image_clip(img_path, safe_duration, width, height, image_fit_mode))
+        clips.append(
+            _frame_image_clip(
+                img_path,
+                safe_duration,
+                width,
+                height,
+                image_fit_mode,
+                motion_effect=motion_effect,
+                scene_index=idx,
+            )
+        )
     return clips
 
 
@@ -353,6 +572,7 @@ def render_video(
     image_fit_mode: str = "fit",
     background_music: str = "none",
     background_music_volume: float = 0.12,
+    motion_effect: str = "gentle_zoom",
 ) -> str:
     os.makedirs(output_dir, exist_ok=True)
     output_path = str(Path(output_dir) / filename)
@@ -365,6 +585,10 @@ def render_video(
         raise RuntimeError("render_video: no image clips were created")
 
     min_d, max_d = _duration_bounds(aspect_ratio)
+    print(
+        f"[render_video] motion_effect={motion_effect!r} n_scenes={len(image_paths)} "
+        f"aspect_ratio={aspect_ratio!r} image_fit_mode={image_fit_mode!r}"
+    )
 
     use_audio = audio_path and os.path.exists(audio_path) and os.path.getsize(audio_path) > 0
 
@@ -390,7 +614,18 @@ def render_video(
 
     if narration_ok and audio_duration is not None and audio_clip is not None:
         scaled_durations = _scale_scene_durations_to_target(scene_durations, audio_duration)
-        clips = _clips_from_images(image_paths, scaled_durations, aspect_ratio, image_fit_mode)
+        print(
+            f"[render_video] scene_durations_s count={len(scaled_durations)} "
+            f"min={min(scaled_durations):.2f} max={max(scaled_durations):.2f} "
+            f"sum={sum(scaled_durations):.2f} (per-scene motion logs follow)"
+        )
+        clips = _clips_from_images(
+            image_paths,
+            scaled_durations,
+            aspect_ratio,
+            image_fit_mode,
+            motion_effect,
+        )
         video = concatenate_videoclips(clips, method="compose")
 
         vd = float(video.duration)
@@ -422,7 +657,12 @@ def render_video(
         audio_clip = None
 
     durations = _scale_durations_when_no_audio(scene_durations, aspect_ratio)
-    clips = _clips_from_images(image_paths, durations, aspect_ratio, image_fit_mode)
+    print(
+        f"[render_video] scene_durations_s count={len(durations)} "
+        f"min={min(durations):.2f} max={max(durations):.2f} sum={sum(durations):.2f} "
+        f"(per-scene motion logs follow)"
+    )
+    clips = _clips_from_images(image_paths, durations, aspect_ratio, image_fit_mode, motion_effect)
     video = concatenate_videoclips(clips, method="compose")
 
     if video.duration > max_d:
@@ -432,7 +672,15 @@ def render_video(
         pad = min_d - video.duration
         last_img_path = image_paths[-1]
         width, height = _aspect_resolution(aspect_ratio)
-        pad_clip = _frame_image_clip(last_img_path, pad, width, height, image_fit_mode)
+        pad_clip = _frame_image_clip(
+            last_img_path,
+            pad,
+            width,
+            height,
+            image_fit_mode,
+            motion_effect=motion_effect,
+            scene_index=-1,
+        )
         video = concatenate_videoclips([video, pad_clip], method="compose")
         pad_clip.close()
 

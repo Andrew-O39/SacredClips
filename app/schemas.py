@@ -20,6 +20,8 @@ BackgroundMusic = Literal[
     "gentle_choir",
 ]
 
+MotionEffect = Literal["none", "gentle_zoom", "slow_pan", "ken_burns"]
+
 
 class Scene(BaseModel):
     index: int = Field(ge=1)
@@ -39,6 +41,7 @@ class VideoRequest(BaseModel):
     image_fit_mode: ImageFitMode = "fit"
     background_music: BackgroundMusic = "none"
     background_music_volume: float = Field(default=0.12, ge=0.0, le=0.5)
+    motion_effect: MotionEffect = "gentle_zoom"
 
 
 class ManualVideoRequest(BaseModel):
@@ -58,6 +61,7 @@ class ManualVideoRequest(BaseModel):
     image_fit_mode: ImageFitMode = "fit"
     background_music: BackgroundMusic = "none"
     background_music_volume: float = Field(default=0.12, ge=0.0, le=0.5)
+    motion_effect: MotionEffect = "gentle_zoom"
 
 
 class VideoResponse(BaseModel):

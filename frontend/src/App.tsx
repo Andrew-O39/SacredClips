@@ -31,6 +31,8 @@ type ImageFitMode = 'fit' | 'fill'
 
 type BackgroundMusic = 'none' | 'peaceful_piano' | 'ambient_pad' | 'soft_strings' | 'gentle_choir'
 
+type MotionEffect = 'none' | 'gentle_zoom' | 'slow_pan' | 'ken_burns'
+
 function roundToHalfSecond(value: number): number {
   return Math.max(0.5, Math.round(value * 2) / 2)
 }
@@ -163,6 +165,7 @@ export const App: React.FC = () => {
   const [imageFitMode, setImageFitMode] = useState<ImageFitMode>('fit')
   const [backgroundMusic, setBackgroundMusic] = useState<BackgroundMusic>('none')
   const [backgroundMusicVolume, setBackgroundMusicVolume] = useState(0.12)
+  const [motionEffect, setMotionEffect] = useState<MotionEffect>('gentle_zoom')
   const [editedScenes, setEditedScenes] = useState<Scene[]>([])
   const [manualUploads, setManualUploads] = useState<Record<number, File | undefined>>({})
   const [manualImageModes, setManualImageModes] = useState<Record<number, ManualImageMode>>({})
@@ -254,6 +257,7 @@ export const App: React.FC = () => {
           image_fit_mode: imageFitMode,
           background_music: backgroundMusic,
           background_music_volume: backgroundMusicVolume,
+          motion_effect: motionEffect,
         }),
       })
 
@@ -321,6 +325,7 @@ export const App: React.FC = () => {
       fd.append('image_fit_mode', imageFitMode)
       fd.append('background_music', backgroundMusic)
       fd.append('background_music_volume', String(backgroundMusicVolume))
+      fd.append('motion_effect', motionEffect)
       fd.append('narration_source', manualNarrationSource)
       if (manualNarrationSource === 'upload' && manualAudioUpload) {
         fd.append('audio_upload', manualAudioUpload)
@@ -403,6 +408,7 @@ export const App: React.FC = () => {
           image_fit_mode: imageFitMode,
           background_music: backgroundMusic,
           background_music_volume: backgroundMusicVolume,
+          motion_effect: motionEffect,
         }),
       })
 
@@ -1210,6 +1216,23 @@ export const App: React.FC = () => {
                   </p>
                 </>
               )}
+            </div>
+
+            <div>
+              <div className="field-label">Motion effect</div>
+              <select
+                className="select input-full"
+                value={motionEffect}
+                onChange={e => setMotionEffect(e.target.value as MotionEffect)}
+              >
+                <option value="none">None</option>
+                <option value="gentle_zoom">Gentle zoom</option>
+                <option value="slow_pan">Slow pan</option>
+                <option value="ken_burns">Ken Burns</option>
+              </select>
+              <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
+                Adds subtle motion to still images. Ken Burns gently zooms and pans across the image.
+              </p>
             </div>
 
             <div>
