@@ -1,6 +1,5 @@
 import os
 import re
-import textwrap
 import traceback
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -39,8 +38,12 @@ ASPECT_DURATION_BOUNDS: dict[str, Tuple[float, float]] = {
     "1:1": (60.0, 180.0),
 }
 
-SUBTITLE_MIN_CHUNK_SEC = 0.45
-SUBTITLE_MAX_CHUNK_CHARS = 130
+SUBTITLE_MIN_CHUNK_SEC = 0.40
+# Long landscape chunks; shorts / 9:16 use tighter caps so lines fit without truncation.
+SUBTITLE_MAX_CHUNK_CHARS_DEFAULT = 130
+SUBTITLE_MAX_CHUNK_CHARS_SHORTS = 68
+# When allowing more subtitle cards per scene (shorts / vertical), use a slightly shorter floor.
+SUBTITLE_CHUNK_FLOOR_SEC_SHORTS = 0.36
 
 _SUBTITLE_STYLE_PARAMS: dict[str, dict[str, float | int]] = {
     "minimal": {
@@ -52,6 +55,7 @@ _SUBTITLE_STYLE_PARAMS: dict[str, dict[str, float | int]] = {
         "bg_alpha": 145,
         "stroke": 0,
         "bold": 0,
+        "max_lines": 2,
     },
     "cinematic": {
         "font_frac": 0.034,
@@ -62,16 +66,18 @@ _SUBTITLE_STYLE_PARAMS: dict[str, dict[str, float | int]] = {
         "bg_alpha": 158,
         "stroke": 1,
         "bold": 0,
+        "max_lines": 2,
     },
     "shorts": {
         "font_frac": 0.042,
         "margin_frac": 0.115,
         "max_width_frac": 0.9,
-        "pad_x": 18,
-        "pad_y": 12,
+        "pad_x": 16,
+        "pad_y": 11,
         "bg_alpha": 178,
         "stroke": 2,
         "bold": 1,
+        "max_lines": 3,
     },
 }
 
@@ -126,6 +132,63 @@ def _split_sentence_chunks(text: str) -> List[str]:
     return out if out else [t]
 
 
+def _split_clauses_fine(text: str) -> List[str]:
+    """Split on commas / semicolons / colons for shorter subtitle units (Shorts / vertical)."""
+    t = (text or "").strip()
+    if not t:
+        return []
+    parts = re.split(r"(?<=[,;:])\s+", t)
+    out = [p.strip() for p in parts if p.strip()]
+    return out if out else [t]
+
+
+def _split_long_piece_by_words(piece: str, max_chars: int) -> List[str]:
+    """Word-wrap a long clause into multiple chunks without mid-word truncation when possible."""
+    piece = piece.strip()
+    if not piece:
+        return []
+    if len(piece) <= max_chars:
+        return [piece]
+    words = piece.split()
+    chunks: List[str] = []
+    buf: List[str] = []
+    cur = 0
+    for w in words:
+        add = len(w) + (1 if buf else 0)
+        if cur + add <= max_chars:
+            buf.append(w)
+            cur += add
+        else:
+            if buf:
+                chunks.append(" ".join(buf))
+            if len(w) > max_chars:
+                for i in range(0, len(w), max(1, max_chars - 8)):
+                    chunks.append(w[i : i + max(1, max_chars - 8)])
+                buf = []
+                cur = 0
+            else:
+                buf = [w]
+                cur = len(w)
+    if buf:
+        chunks.append(" ".join(buf))
+    return chunks if chunks else [piece[:max_chars]]
+
+
+def _split_subtitle_fragments(text: str, fine_split: bool) -> List[str]:
+    """Sentence-based split; optional secondary split for Shorts / 9:16."""
+    t = (text or "").strip()
+    if not t:
+        return []
+    sentences = _split_sentence_chunks(t)
+    if not fine_split:
+        return sentences
+    fine: List[str] = []
+    for sent in sentences:
+        for clause in _split_clauses_fine(sent):
+            fine.extend(_split_long_piece_by_words(clause, SUBTITLE_MAX_CHUNK_CHARS_SHORTS))
+    return fine if fine else sentences
+
+
 def _merge_short_fragments(parts: List[str], min_len: int = 14) -> List[str]:
     if not parts:
         return []
@@ -156,56 +219,141 @@ def _merge_until_chunk_budget(parts: List[str], max_chunks: int) -> List[str]:
     return cur
 
 
-def _chunk_subtitle_text_for_scene(text: str, scene_duration: float) -> List[str]:
+def _chunk_subtitle_text_for_scene(
+    text: str,
+    scene_duration: float,
+    aspect_ratio: str,
+    subtitle_style: str,
+) -> List[str]:
     d = max(float(scene_duration), MIN_SCENE_CLIP)
-    max_chunks = max(1, min(36, int(d / SUBTITLE_MIN_CHUNK_SEC)))
-    raw = _split_sentence_chunks(text)
-    parts = _merge_short_fragments(raw)
+    ss = _normalize_subtitle_style(subtitle_style)
+    fine = aspect_ratio == "9:16" or ss == "shorts"
+    floor_sec = SUBTITLE_CHUNK_FLOOR_SEC_SHORTS if fine else SUBTITLE_MIN_CHUNK_SEC
+    max_chunks = max(1, min(52 if fine else 36, int(d / floor_sec)))
+    max_chars = SUBTITLE_MAX_CHUNK_CHARS_SHORTS if fine else SUBTITLE_MAX_CHUNK_CHARS_DEFAULT
+
+    raw = _split_subtitle_fragments(text, fine_split=fine)
+    min_frag = 8 if fine else 14
+    parts = _merge_short_fragments(raw, min_len=min_frag)
     if not parts:
         return [""]
     parts = _merge_until_chunk_budget(parts, max_chunks)
+
     out: List[str] = []
     for p in parts:
         p = p.strip()
-        if len(p) > SUBTITLE_MAX_CHUNK_CHARS:
-            p = p[: SUBTITLE_MAX_CHUNK_CHARS - 3].rstrip() + "..."
-        if p:
+        if not p:
+            continue
+        if len(p) <= max_chars:
             out.append(p)
+        else:
+            out.extend(_split_long_piece_by_words(p, max_chars))
     return out if out else [""]
 
 
-def _wrap_two_lines(text: str, draw: ImageDraw.ImageDraw, font: ImageFont.ImageFont, max_width: int) -> List[str]:
-    """At most two lines; trim with ... to fit max_width."""
+def _line_width(draw: ImageDraw.ImageDraw, s: str, font: ImageFont.ImageFont, stroke_w: int) -> float:
+    bb = draw.textbbox((0, 0), s, font=font, stroke_width=stroke_w or 0)
+    return float(bb[2] - bb[0])
+
+
+def _truncate_with_ellipsis(
+    draw: ImageDraw.ImageDraw,
+    s: str,
+    font: ImageFont.ImageFont,
+    max_width: float,
+    stroke_w: int,
+) -> str:
+    s = s.strip()
+    if not s:
+        return ""
+    if _line_width(draw, s, font, stroke_w) <= max_width:
+        return s
+    ell = "…"
+    ew = _line_width(draw, ell, font, stroke_w)
+    if ew > max_width:
+        return ""
+    lo, hi = 0, len(s)
+    best = ell
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        trial = (s[:mid].rstrip() + ell).strip()
+        if _line_width(draw, trial, font, stroke_w) <= max_width:
+            best = trial
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best if best.strip() else ell
+
+
+def _wrap_subtitle_lines(
+    text: str,
+    draw: ImageDraw.ImageDraw,
+    font: ImageFont.ImageFont,
+    max_width: float,
+    max_lines: int,
+    stroke_w: int,
+) -> List[str]:
+    """Greedy word wrap to at most max_lines; ellipsis only when a token cannot fit."""
     t = text.replace("\n", " ").strip()
     if not t:
         return [""]
-    bbox = draw.textbbox((0, 0), "M", font=font)
-    cw = max(1.0, float(bbox[2] - bbox[0]))
-    cols = max(18, int(max_width / cw))
-    parts = textwrap.wrap(t, width=cols, break_long_words=True, break_on_hyphens=False)
-    if not parts:
-        return [t[:cols] + "..."]
-    if len(parts) <= 2:
-        lines = parts[:2]
-    else:
-        mid = max(1, len(parts) // 2)
-        lines = [" ".join(parts[:mid]).strip(), " ".join(parts[mid:]).strip()]
+    words = t.split()
+    lines: List[str] = []
+    remaining = list(words)
+    sw = stroke_w or 0
 
-    def _trim(s: str) -> str:
-        s = s.strip()
-        if not s:
-            return ""
-        while len(s) > 4:
-            bb = draw.textbbox((0, 0), s, font=font)
-            if bb[2] - bb[0] <= max_width:
-                return s
-            s = s[:-4].rstrip() + "..."
-        return s[:3] + "..."
+    def join_ws(ws: List[str]) -> str:
+        return " ".join(ws).strip()
 
-    out = [_trim(lines[0])]
-    if len(lines) > 1 and lines[1]:
-        out.append(_trim(lines[1]))
-    return out if out[0] else [""]
+    while remaining and len(lines) < max_lines:
+        line_words: List[str] = []
+        while remaining:
+            w0 = remaining[0]
+            trial = join_ws(line_words + [w0]) if line_words else w0
+            if _line_width(draw, trial, font, sw) <= max_width:
+                line_words.append(remaining.pop(0))
+            else:
+                break
+        if line_words:
+            lines.append(join_ws(line_words))
+        elif remaining:
+            w0 = remaining.pop(0)
+            lines.append(_truncate_with_ellipsis(draw, w0, font, max_width, sw))
+        else:
+            break
+
+    if remaining:
+        tail = join_ws(remaining)
+        if not lines:
+            lines = [_truncate_with_ellipsis(draw, tail, font, max_width, sw)]
+        else:
+            merged = (lines[-1] + " " + tail).strip()
+            lines[-1] = _truncate_with_ellipsis(draw, merged, font, max_width, sw)
+
+    return lines[:max_lines] if lines else [""]
+
+
+def _subtitle_chunk_durations(scene_duration: float, chunks: List[str]) -> List[float]:
+    """Allocate time by chunk size so longer on-screen text gets more time (helps uploaded narration)."""
+    d = max(float(scene_duration), MIN_SCENE_CLIP)
+    n = len(chunks)
+    if n == 0:
+        return []
+    if n == 1:
+        return [d]
+    floor_sec = SUBTITLE_MIN_CHUNK_SEC
+    floor_total = n * floor_sec
+    if d <= floor_total + 1e-6:
+        return [d / n] * n
+    remain = d - floor_total
+    weights = [max(1.0, float(len(c.split()))) for c in chunks]
+    tw = sum(weights)
+    extras = [remain * (w / tw) for w in weights]
+    out = [floor_sec + e for e in extras]
+    drift = d - sum(out)
+    if out:
+        out[-1] = max(floor_sec * 0.5, out[-1] + drift)
+    return out
 
 
 def _render_subtitle_rgba_frame(
@@ -213,6 +361,7 @@ def _render_subtitle_rgba_frame(
     height: int,
     text: str,
     style: str,
+    aspect_ratio: str = "",
 ) -> np.ndarray:
     cfg = _SUBTITLE_STYLE_PARAMS.get(style, _SUBTITLE_STYLE_PARAMS["minimal"])
     font_frac = float(cfg["font_frac"])
@@ -223,24 +372,50 @@ def _render_subtitle_rgba_frame(
     bg_alpha = int(cfg["bg_alpha"])
     stroke_w = int(cfg["stroke"])
     bold = bool(int(cfg["bold"]))
+    max_lines = int(cfg.get("max_lines", 2))
+
+    is_portrait = int(height) > int(width)
+    if is_portrait:
+        max_width_frac = min(0.92, max_width_frac + 0.04)
+        margin_frac = max(0.068, margin_frac - 0.022)
 
     img = Image.new("RGBA", (int(width), int(height)), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    font_size = max(14, int(height * font_frac))
-    font = _load_subtitle_font(font_size, bold=bold)
+    base_font = max(14, int(height * font_frac))
+    min_font = 13 if style == "shorts" else 12
     max_text_w = int(width * max_width_frac)
 
-    lines = _wrap_two_lines(text.strip(), draw, font, max_text_w)
-    joined = "\n".join(lines)
-    bbox = draw.multiline_textbbox((0, 0), joined, font=font, spacing=4, stroke_width=stroke_w if stroke_w else 0)
+    chosen_font = _load_subtitle_font(base_font, bold=bold)
+    chosen_lines: List[str] = []
+    for size in range(base_font, min_font - 1, -1):
+        font = _load_subtitle_font(size, bold=bold)
+        lines = _wrap_subtitle_lines(text.strip(), draw, font, float(max_text_w), max_lines, stroke_w)
+        lines_kept = [ln for ln in lines if ln.strip()]
+        ok = bool(lines_kept) and all(
+            _line_width(draw, ln, font, stroke_w) <= max_text_w + 2 for ln in lines_kept
+        )
+        if ok:
+            chosen_font = font
+            chosen_lines = lines
+            break
+    else:
+        chosen_font = _load_subtitle_font(min_font, bold=bold)
+        chosen_lines = _wrap_subtitle_lines(
+            text.strip(), draw, chosen_font, float(max_text_w), max_lines, stroke_w
+        )
+
+    joined = "\n".join(chosen_lines)
+    bbox = draw.multiline_textbbox(
+        (0, 0), joined, font=chosen_font, spacing=4, stroke_width=stroke_w if stroke_w else 0
+    )
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
-    box_w = min(int(width * 0.94), tw + 2 * pad_x)
+    box_w = min(int(width * (0.94 if not is_portrait else 0.96)), tw + 2 * pad_x)
     box_h = th + 2 * pad_y
     margin_bottom = int(height * margin_frac)
     x0 = (width - box_w) // 2
     y0 = height - margin_bottom - box_h
-    y0 = min(y0, height - box_h - int(height * 0.02))
+    y0 = min(y0, height - box_h - int(height * 0.028))
     y0 = max(0, y0)
 
     overlay = Image.new("RGBA", (box_w, box_h), (12, 12, 18, bg_alpha))
@@ -249,7 +424,7 @@ def _render_subtitle_rgba_frame(
     tx = x0 + pad_x - bbox[0]
     ty = y0 + pad_y - bbox[1]
     text_kw: dict = {
-        "font": font,
+        "font": chosen_font,
         "fill": (248, 248, 252, 255),
         "spacing": 4,
     }
@@ -281,14 +456,15 @@ def _build_subtitle_strip_clip(
     width: int,
     height: int,
     style: str,
+    aspect_ratio: str,
 ):
-    chunks = _chunk_subtitle_text_for_scene(text, scene_duration)
+    chunks = _chunk_subtitle_text_for_scene(text, scene_duration, aspect_ratio, style)
     n = len(chunks)
     d = max(float(scene_duration), MIN_SCENE_CLIP)
-    each = d / n
+    durations = _subtitle_chunk_durations(d, chunks)
     sub_clips = []
-    for ch in chunks:
-        rgba = _render_subtitle_rgba_frame(width, height, ch, style)
+    for ch, each in zip(chunks, durations):
+        rgba = _render_subtitle_rgba_frame(width, height, ch, style, aspect_ratio=aspect_ratio)
         sub_clips.append(_imageclip_from_rgba(rgba, each))
     if len(sub_clips) == 1:
         strip = sub_clips[0]
@@ -308,6 +484,7 @@ def _maybe_composite_subtitles(
     width: int,
     height: int,
     subtitle_style: str,
+    aspect_ratio: str,
 ):
     ss = _normalize_subtitle_style(subtitle_style)
     if ss == "off":
@@ -316,7 +493,7 @@ def _maybe_composite_subtitles(
         return scene_clip
     d = max(float(scene_duration), MIN_SCENE_CLIP)
     try:
-        strip = _build_subtitle_strip_clip(scene_text, d, width, height, ss)
+        strip = _build_subtitle_strip_clip(scene_text, d, width, height, ss, aspect_ratio)
         try:
             out = CompositeVideoClip([scene_clip, strip], size=(int(width), int(height))).with_duration(d)
         except AttributeError:
@@ -909,7 +1086,7 @@ def _clips_from_images(
         )
         if ss != "off" and idx - 1 < len(texts):
             clip = _maybe_composite_subtitles(
-                clip, texts[idx - 1], safe_duration, width, height, ss
+                clip, texts[idx - 1], safe_duration, width, height, ss, aspect_ratio
             )
         clips.append(clip)
     return clips
@@ -1109,7 +1286,7 @@ def render_video(
         )
         if ss != "off" and st_list:
             pad_clip = _maybe_composite_subtitles(
-                pad_clip, st_list[-1], pad, width, height, ss
+                pad_clip, st_list[-1], pad, width, height, ss, aspect_ratio
             )
         video = concatenate_videoclips([video, pad_clip], method="compose")
         pad_clip.close()

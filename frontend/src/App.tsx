@@ -1422,7 +1422,9 @@ export const App: React.FC = () => {
                 <option value="shorts">Shorts style</option>
               </select>
               <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
-                Subtitles are automatically split into readable chunks during each scene.
+                Subtitles are split into readable chunks during each scene. Shorts and vertical (9:16) use shorter
+                lines and up to three lines when needed. For best timing with uploaded narration, use shorter scene
+                text or create more scene cuts where the spoken lines change.
               </p>
             </div>
 
