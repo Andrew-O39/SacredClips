@@ -700,6 +700,66 @@ export const App: React.FC = () => {
       copy.splice(targetIdx, 0, moved)
       return copy.map((scene, i) => ({ ...scene, index: i + 1 }))
     })
+    clearReplacementUploadState()
+  }
+
+  /** Post-generation timeline: insert a blank placeholder scene after this index and reindex. */
+  const addSceneAfter = (sceneIndex: number) => {
+    setEditedScenes(prev => {
+      const idx = prev.findIndex(s => s.index === sceneIndex)
+      if (idx < 0) return prev
+      const cur = prev[idx]
+      let updatedCur: Scene = { ...cur }
+      let newSceneDuration = 3
+      if (cur.duration_seconds > 2) {
+        const half = roundToHalfSecond(cur.duration_seconds / 2)
+        const rest = roundToHalfSecond(Math.max(0.5, cur.duration_seconds - half))
+        updatedCur = { ...cur, duration_seconds: half }
+        newSceneDuration = rest
+      }
+      const newScene: Scene = {
+        index: 0,
+        text: 'New scene',
+        keywords: ['scene'],
+        duration_seconds: newSceneDuration,
+        image_mode: 'placeholder',
+        image_path: undefined,
+        image_url: undefined,
+      }
+      const nextRaw = [...prev.slice(0, idx), updatedCur, newScene, ...prev.slice(idx + 1)]
+      return reindexScenes(nextRaw)
+    })
+    clearReplacementUploadState()
+  }
+
+  /** Post-generation: duplicate scene (including image_path for shared uploads); reindex. */
+  const duplicateSceneAfter = (sceneIndex: number) => {
+    setEditedScenes(prev => {
+      const idx = prev.findIndex(s => s.index === sceneIndex)
+      if (idx < 0) return prev
+      const source = prev[idx]
+      const dup: Scene = {
+        index: 0,
+        text: source.text,
+        keywords: [...source.keywords],
+        duration_seconds: source.duration_seconds,
+        image_url: source.image_url,
+        image_mode: source.image_mode,
+        image_path: source.image_path ?? undefined,
+      }
+      const nextRaw = [...prev.slice(0, idx + 1), dup, ...prev.slice(idx + 1)]
+      return reindexScenes(nextRaw)
+    })
+    clearReplacementUploadState()
+  }
+
+  /** Post-generation: remove scene if more than one remains; reindex. */
+  const removeSceneFromEditor = (sceneIndex: number) => {
+    setEditedScenes(prev => {
+      if (prev.length <= 1) return prev
+      return reindexScenes(prev.filter(s => s.index !== sceneIndex))
+    })
+    clearReplacementUploadState()
   }
 
   const handleCopyScript = async () => {
@@ -1703,7 +1763,8 @@ export const App: React.FC = () => {
                 )}
                 <p className="footer-hint" style={{ marginBottom: '0.75rem' }}>
                   Edit scene text, keywords, or durations, then regenerate with new AI images aligned to your edits.
-                  Image previews reflect the latest render.
+                  You can add, duplicate, or remove scenes to split narration or reuse an image. Image previews reflect the
+                  latest render.
                 </p>
                 <div className="scene-timeline">
                   <div className="scene-timeline-track">
@@ -1713,7 +1774,10 @@ export const App: React.FC = () => {
                           <div className="scene-title">
                             Scene {scene.index} · {scene.duration_seconds.toFixed(1)}s
                           </div>
-                          <div className="scene-card-actions">
+                          <div
+                            className="scene-card-actions"
+                            style={{ flexWrap: 'wrap', gap: '0.25rem', justifyContent: 'flex-end' }}
+                          >
                             <button
                               type="button"
                               className="tiny-button"
@@ -1729,6 +1793,30 @@ export const App: React.FC = () => {
                               disabled={listIdx === editedScenes.length - 1}
                             >
                               Move Right
+                            </button>
+                            <button
+                              type="button"
+                              className="tiny-button"
+                              onClick={() => addSceneAfter(scene.index)}
+                              disabled={loading}
+                            >
+                              Add scene after
+                            </button>
+                            <button
+                              type="button"
+                              className="tiny-button"
+                              onClick={() => duplicateSceneAfter(scene.index)}
+                              disabled={loading}
+                            >
+                              Duplicate
+                            </button>
+                            <button
+                              type="button"
+                              className="tiny-button"
+                              onClick={() => removeSceneFromEditor(scene.index)}
+                              disabled={loading || editedScenes.length <= 1}
+                            >
+                              Remove
                             </button>
                           </div>
                         </div>
