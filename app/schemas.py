@@ -26,6 +26,8 @@ MotionIntensity = Literal["subtle", "medium", "strong"]
 
 SubtitleStyle = Literal["off", "minimal", "cinematic", "shorts"]
 
+SceneImageMode = Literal["upload", "generate", "placeholder"]
+
 
 class Scene(BaseModel):
     index: int = Field(ge=1)
@@ -34,6 +36,9 @@ class Scene(BaseModel):
     duration_seconds: float = Field(gt=0, le=120)
     # Populated server-side after image generation — optional on requests.
     image_url: Optional[str] = None
+    # Persisted for manual regeneration (local paths under the topic output folder).
+    image_mode: Optional[SceneImageMode] = None
+    image_path: Optional[str] = None
 
 
 class VideoRequest(BaseModel):
@@ -70,6 +75,8 @@ class ManualVideoRequest(BaseModel):
     motion_effect: MotionEffect = "gentle_zoom"
     motion_intensity: MotionIntensity = "subtle"
     subtitle_style: SubtitleStyle = "off"
+    narration_source: Optional[Literal["tts", "upload"]] = None
+    narration_audio_path: Optional[str] = None
 
 
 class VideoResponse(BaseModel):
@@ -78,6 +85,8 @@ class VideoResponse(BaseModel):
     script_text: str
     scenes: List[Scene]
     used_ai: bool
+    narration_source: Optional[Literal["tts", "upload"]] = None
+    narration_audio_path: Optional[str] = None
 
 
 class YouTubeAuthStartResponse(BaseModel):

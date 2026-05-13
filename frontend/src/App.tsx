@@ -21,6 +21,8 @@ type Scene = {
   keywords: string[]
   duration_seconds: number
   image_url?: string | null
+  image_mode?: ManualImageMode | null
+  image_path?: string | null
 }
 
 type CreationMode = 'ai' | 'manual'
@@ -46,12 +48,16 @@ function scenesForApiPayload(scenes: Scene[]): {
   text: string
   keywords: string[]
   duration_seconds: number
+  image_mode?: ManualImageMode
+  image_path?: string
 }[] {
   return scenes.map(s => ({
     index: s.index,
     text: s.text,
     keywords: s.keywords,
     duration_seconds: s.duration_seconds,
+    ...(s.image_mode != null && s.image_mode !== undefined ? { image_mode: s.image_mode } : {}),
+    ...(s.image_path ? { image_path: s.image_path } : {}),
   }))
 }
 
@@ -60,6 +66,8 @@ function sanitizeScenesForPayload(scenes: Scene[]): {
   text: string
   keywords: string[]
   duration_seconds: number
+  image_mode?: ManualImageMode
+  image_path?: string
 }[] {
   return scenes.map(s => {
     const safeText = s.text.trim() || `Manual visual scene ${s.index}`
@@ -72,6 +80,8 @@ function sanitizeScenesForPayload(scenes: Scene[]): {
       text: safeText,
       keywords: safeKeywords.length ? safeKeywords : ['manual scene'],
       duration_seconds: safeDuration,
+      ...(s.image_mode != null && s.image_mode !== undefined ? { image_mode: s.image_mode } : {}),
+      ...(s.image_path ? { image_path: s.image_path } : {}),
     }
   })
 }
@@ -143,6 +153,8 @@ type VideoResponse = {
   script_text: string
   scenes: Scene[]
   used_ai: boolean
+  narration_source?: ManualNarrationSource | null
+  narration_audio_path?: string | null
 }
 
 type YouTubeAuthStatus = {
@@ -177,6 +189,14 @@ export const App: React.FC = () => {
   const [manualImageModes, setManualImageModes] = useState<Record<number, ManualImageMode>>({})
   const [manualNarrationSource, setManualNarrationSource] = useState<ManualNarrationSource>('tts')
   const [manualAudioUpload, setManualAudioUpload] = useState<File | undefined>(undefined)
+  /** Server path for uploaded narration; used on JSON regeneration without re-uploading. */
+  const [persistedManualNarration, setPersistedManualNarration] = useState<{
+    source: 'upload'
+    path: string
+  } | null>(null)
+  /** Post-render manual only: new image files to send via multipart /manual-video. */
+  const [replacementUploads, setReplacementUploads] = useState<Record<number, File | undefined>>({})
+  const [replacementPreviewUrls, setReplacementPreviewUrls] = useState<Record<number, string>>({})
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const musicPreviewRef = useRef<HTMLAudioElement | null>(null)
@@ -225,6 +245,43 @@ export const App: React.FC = () => {
     await new Promise(resolve => setTimeout(resolve, 250))
   }
 
+  const clearReplacementUploadState = () => {
+    setReplacementPreviewUrls(prev => {
+      Object.values(prev).forEach(u => {
+        try {
+          URL.revokeObjectURL(u)
+        } catch {
+          /* ignore */
+        }
+      })
+      return {}
+    })
+    setReplacementUploads({})
+  }
+
+  const updateReplacementUploadForScene = (sceneIndex: number, file: File | undefined) => {
+    setReplacementPreviewUrls(prev => {
+      const old = prev[sceneIndex]
+      if (old) {
+        try {
+          URL.revokeObjectURL(old)
+        } catch {
+          /* ignore */
+        }
+      }
+      const next = { ...prev }
+      if (!file) delete next[sceneIndex]
+      else next[sceneIndex] = URL.createObjectURL(file)
+      return next
+    })
+    setReplacementUploads(prev => {
+      const next = { ...prev }
+      if (!file) delete next[sceneIndex]
+      else next[sceneIndex] = file
+      return next
+    })
+  }
+
   const resetToNewVideo = () => {
     setResult(null)
     setEditedScript('')
@@ -232,6 +289,8 @@ export const App: React.FC = () => {
     setManualUploads({})
     setManualImageModes({})
     setManualAudioUpload(undefined)
+    setPersistedManualNarration(null)
+    clearReplacementUploadState()
     setVideoVersion(0)
     setYoutubeSuccessUrl(null)
     setYoutubeError(null)
@@ -246,6 +305,8 @@ export const App: React.FC = () => {
     beginGenerationProgress('ai')
     setError(null)
     setResult(null)
+    setPersistedManualNarration(null)
+    clearReplacementUploadState()
     setEditMode(false)
     setLoading(true)
     setYoutubeError(null)
@@ -285,6 +346,7 @@ export const App: React.FC = () => {
       setYoutubeSuccessUrl(null)
       setManualUploads({})
       setManualImageModes({})
+      setPersistedManualNarration(null)
     } catch (err: any) {
       console.error(err)
       setError(err.message || 'Something went wrong')
@@ -308,6 +370,7 @@ export const App: React.FC = () => {
     }
     setError(null)
     setResult(null)
+    clearReplacementUploadState()
     beginGenerationProgress(manualNarrationSource === 'upload' ? 'manual_upload' : 'manual_tts')
     setLoading(true)
     setYoutubeError(null)
@@ -374,6 +437,11 @@ export const App: React.FC = () => {
       setManualUploads({})
       setManualImageModes({})
       setManualAudioUpload(undefined)
+      setPersistedManualNarration(
+        data.narration_source === 'upload' && data.narration_audio_path
+          ? { source: 'upload', path: data.narration_audio_path }
+          : null,
+      )
     } catch (err: any) {
       console.error(err)
       setError(err.message || 'Something went wrong')
@@ -404,43 +472,117 @@ export const App: React.FC = () => {
     setYoutubeError(null)
     setYoutubeSuccessUrl(null)
     try {
-      const res = await fetch(`${API_BASE_URL}/generate-video-from-scenes`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          topic,
-          style,
-          duration_seconds: duration,
-          script_text: timelineScript,
-          scenes: scenesForApiPayload(editedScenes),
-          visual_style: visualStyle,
-          aspect_ratio: aspectRatio,
-          image_fit_mode: imageFitMode,
-          background_music: backgroundMusic,
-          background_music_volume: backgroundMusicVolume,
-          motion_effect: motionEffect,
-          motion_intensity: motionIntensity,
-          subtitle_style: subtitleStyle,
-        }),
-      })
+      const hasReplacementFiles =
+        !result.used_ai && editedScenes.some(s => Boolean(replacementUploads[s.index]))
 
-      if (!res.ok) {
-        const text = await res.text()
-        throw new Error(text || 'Request failed')
+      const applyRebuildSuccess = async (data: VideoResponse) => {
+        await finishGenerationProgress()
+        setResult(data)
+        setEditMode(false)
+        setEditedScript(data.script_text)
+        setEditedScenes(data.scenes)
+        setVideoVersion(prev => prev + 1) // new video, force reload
+        setYoutubeTitle(topic)
+        setYoutubeDescription(data.script_text)
+        setYoutubeSuccessUrl(null)
+        setManualUploads({})
+        setManualImageModes({})
+        setPersistedManualNarration(
+          data.narration_source === 'upload' && data.narration_audio_path
+            ? { source: 'upload', path: data.narration_audio_path }
+            : null,
+        )
+        clearReplacementUploadState()
       }
 
-      const data: VideoResponse = await res.json()
-      await finishGenerationProgress()
-      setResult(data)
-      setEditMode(false)
-      setEditedScript(data.script_text)
-      setEditedScenes(data.scenes)
-      setVideoVersion(prev => prev + 1) // new video, force reload
-      setYoutubeTitle(topic)
-      setYoutubeDescription(data.script_text)
-      setYoutubeSuccessUrl(null)
-      setManualUploads({})
-      setManualImageModes({})
+      if (hasReplacementFiles) {
+        const safeScenesPayload = sanitizeScenesForPayload(editedScenes)
+        const fd = new FormData()
+        fd.append('topic', topic)
+        fd.append('script_text', timelineScript)
+        fd.append('scenes_json', JSON.stringify(safeScenesPayload))
+        fd.append('visual_style', visualStyle)
+        fd.append('duration_seconds', String(duration))
+        fd.append('style', style)
+        fd.append('aspect_ratio', aspectRatio)
+        fd.append('image_fit_mode', imageFitMode)
+        fd.append('background_music', backgroundMusic)
+        fd.append('background_music_volume', String(backgroundMusicVolume))
+        fd.append('motion_effect', motionEffect)
+        fd.append('motion_intensity', motionIntensity)
+        fd.append('subtitle_style', subtitleStyle)
+
+        if (persistedManualNarration) {
+          fd.append('narration_source', 'upload')
+          fd.append('narration_audio_path', persistedManualNarration.path)
+        } else {
+          fd.append('narration_source', 'tts')
+        }
+
+        for (const s of editedScenes) {
+          const rep = replacementUploads[s.index]
+          if (rep) {
+            fd.append(`scene_image_mode_${s.index}`, 'upload')
+            fd.append(`scene_upload_${s.index}`, rep)
+          } else {
+            const mode: ManualImageMode =
+              s.image_mode ?? (s.image_path ? 'upload' : 'placeholder')
+            fd.append(`scene_image_mode_${s.index}`, mode)
+          }
+        }
+
+        const res = await fetch(`${API_BASE_URL}/manual-video`, {
+          method: 'POST',
+          body: fd,
+        })
+
+        if (!res.ok) {
+          const text = await res.text()
+          throw new Error(text || 'Manual video request failed')
+        }
+
+        const data: VideoResponse = await res.json()
+        await applyRebuildSuccess(data)
+      } else {
+        const narrationPayload: Record<string, string> = {}
+        if (!result.used_ai) {
+          if (persistedManualNarration) {
+            narrationPayload.narration_source = 'upload'
+            narrationPayload.narration_audio_path = persistedManualNarration.path
+          } else {
+            narrationPayload.narration_source = 'tts'
+          }
+        }
+
+        const res = await fetch(`${API_BASE_URL}/generate-video-from-scenes`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            topic,
+            style,
+            duration_seconds: duration,
+            script_text: timelineScript,
+            scenes: scenesForApiPayload(editedScenes),
+            visual_style: visualStyle,
+            aspect_ratio: aspectRatio,
+            image_fit_mode: imageFitMode,
+            background_music: backgroundMusic,
+            background_music_volume: backgroundMusicVolume,
+            motion_effect: motionEffect,
+            motion_intensity: motionIntensity,
+            subtitle_style: subtitleStyle,
+            ...narrationPayload,
+          }),
+        })
+
+        if (!res.ok) {
+          const text = await res.text()
+          throw new Error(text || 'Request failed')
+        }
+
+        const data: VideoResponse = await res.json()
+        await applyRebuildSuccess(data)
+      }
     } catch (err: any) {
       console.error(err)
       setError(err.message || 'Something went wrong')
@@ -1017,7 +1159,10 @@ export const App: React.FC = () => {
                       type="radio"
                       name="manual-narration-source"
                       checked={manualNarrationSource === 'tts'}
-                      onChange={() => setManualNarrationSource('tts')}
+                      onChange={() => {
+                        setManualNarrationSource('tts')
+                        setPersistedManualNarration(null)
+                      }}
                     />
                     Generate AI voice from script
                   </label>
@@ -1639,6 +1784,33 @@ export const App: React.FC = () => {
                             })
                           }
                         />
+                        {!result.used_ai && (
+                          <div style={{ marginTop: '0.5rem' }}>
+                            <div className="field-label">Replace scene image</div>
+                            <input
+                              key={`replace-scene-${scene.index}-${videoVersion}`}
+                              type="file"
+                              accept="image/*"
+                              className="input"
+                              onChange={e => {
+                                const f = e.target.files?.[0]
+                                updateReplacementUploadForScene(scene.index, f)
+                              }}
+                            />
+                            <p className="footer-hint" style={{ marginTop: '0.2rem' }}>
+                              Select a new image, then regenerate the video.
+                            </p>
+                            {replacementPreviewUrls[scene.index] ? (
+                              <div className="scene-preview" style={{ marginTop: '0.35rem', maxHeight: 140 }}>
+                                <img
+                                  alt={`Replacement preview scene ${scene.index}`}
+                                  src={replacementPreviewUrls[scene.index]}
+                                  style={{ maxHeight: 130, objectFit: 'contain', width: '100%' }}
+                                />
+                              </div>
+                            ) : null}
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>

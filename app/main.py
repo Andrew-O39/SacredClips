@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import List
+from typing import List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -176,12 +176,14 @@ def _sort_scenes(scenes: List[Scene]) -> List[Scene]:
 
 
 def _strip_scene_for_render(s: Scene) -> Scene:
-    """Forget client-side image URL hints; regenerate media URL server-side."""
+    """Forget client-side image URL; keep persisted manual asset hints for regeneration."""
     return Scene(
         index=s.index,
         text=s.text,
         keywords=s.keywords,
         duration_seconds=s.duration_seconds,
+        image_mode=s.image_mode,
+        image_path=s.image_path,
     )
 
 
@@ -190,14 +192,31 @@ def _path_to_media_url(abs_img: Path) -> str:
     return f"/media/{rel.as_posix()}"
 
 
+def _safe_resolved_file_under_dir(expected_parent: Path, candidate: str | None) -> Path | None:
+    """Reject path traversal: only files under expected_parent (resolved) are accepted."""
+    if not candidate or not isinstance(candidate, str):
+        return None
+    try:
+        p = Path(candidate).expanduser().resolve()
+        parent = expected_parent.resolve()
+        p.relative_to(parent)
+        if p.is_file() and p.stat().st_size > 0:
+            return p
+    except Exception:
+        return None
+    return None
+
+
 def _scenes_with_image_urls(scenes_ordered: List[Scene], image_paths: List[str]) -> List[Scene]:
     combined: List[Scene] = []
     for idx, scene in enumerate(scenes_ordered):
-        base = _strip_scene_for_render(scene)
         img_url: str | None = None
+        ip = scene.image_path
         if idx < len(image_paths):
-            img_url = _path_to_media_url(Path(image_paths[idx]))
-        combined.append(base.model_copy(update={"image_url": img_url}))
+            abs_img = Path(image_paths[idx]).resolve()
+            img_url = _path_to_media_url(abs_img)
+            ip = str(abs_img)
+        combined.append(scene.model_copy(update={"image_url": img_url, "image_path": ip}))
     return combined
 
 
@@ -217,6 +236,8 @@ def _finalize_video_response(
     motion_effect: MotionEffect = "gentle_zoom",
     motion_intensity: MotionIntensity = "subtle",
     subtitle_style: SubtitleStyle = "off",
+    narration_source: Optional[Literal["tts", "upload"]] = None,
+    narration_audio_path: Optional[str] = None,
 ) -> VideoResponse:
     scene_durations = [s.duration_seconds for s in scenes_ordered]
     subtitle_texts = [s.text for s in scenes_ordered]
@@ -248,37 +269,105 @@ def _finalize_video_response(
         script_text=script_text,
         scenes=scenes_out,
         used_ai=used_ai_flag,
+        narration_source=narration_source,
+        narration_audio_path=narration_audio_path,
     )
 
 
 def _regenerate_from_manual_request(req: ManualVideoRequest) -> VideoResponse:
     """
     Images + TTS + render from structured scenes & script_text (edited script / scenes).
+
+    Reuses uploaded scene images and uploaded narration paths when the client resends them.
     """
     _, audio_dir, images_dir, videos_dir = _prepare_topic_dirs(req.topic)
-    scenes_ordered = [_strip_scene_for_render(s) for s in _sort_scenes(req.scenes)]
+    scenes_sorted = [_strip_scene_for_render(s) for s in _sort_scenes(req.scenes)]
+    image_paths: List[str] = []
+    scenes_for_finalize: List[Scene] = []
 
-    per_scene_keywords = [s.keywords for s in scenes_ordered]
-    scene_texts = [s.text for s in scenes_ordered]
-    image_paths = image_service.generate_images_for_keywords(
-        topic=req.topic,
-        per_scene_keywords=per_scene_keywords,
-        output_dir=str(images_dir),
-        visual_style=req.visual_style,
-        aspect_ratio=req.aspect_ratio,
-        scene_texts=scene_texts,
-    )
+    for s in scenes_sorted:
+        base_path = images_dir / f"scene_{s.index}_manual"
+        mode = s.image_mode
 
-    audio_path = tts_service.text_to_speech(
-        text=req.script_text,
-        output_dir=str(audio_dir),
-        filename="voiceover.mp3",
-    )
+        if mode == "upload" and s.image_path:
+            safe = _safe_resolved_file_under_dir(images_dir, s.image_path)
+            if safe:
+                rp = str(safe)
+                image_paths.append(rp)
+                scenes_for_finalize.append(s.model_copy(update={"image_path": rp, "image_mode": "upload"}))
+                continue
+
+        if mode == "placeholder":
+            dest = Path(f"{base_path}_placeholder.png")
+            image_service.write_placeholder_scene_image(
+                topic=req.topic,
+                keywords=s.keywords,
+                scene_index=s.index,
+                visual_style=req.visual_style,
+                aspect_ratio=req.aspect_ratio,
+                output_path=str(dest),
+                scene_text=s.text,
+            )
+            rp = str(dest.resolve())
+            image_paths.append(rp)
+            scenes_for_finalize.append(s.model_copy(update={"image_path": rp, "image_mode": "placeholder"}))
+            continue
+
+        # generate (explicit) or unknown / missing upload path — regenerate AI image
+        ai_scene_dir = images_dir / f"scene_{s.index}_manual_ai_regen"
+        generated = image_service.generate_images_for_keywords(
+            topic=req.topic,
+            per_scene_keywords=[s.keywords],
+            output_dir=str(ai_scene_dir),
+            visual_style=req.visual_style,
+            aspect_ratio=req.aspect_ratio,
+            scene_texts=[s.text],
+        )
+        if generated:
+            p = Path(generated[0]).resolve()
+            rp = str(p)
+            image_paths.append(rp)
+            scenes_for_finalize.append(s.model_copy(update={"image_path": rp, "image_mode": "generate"}))
+        else:
+            dest = Path(f"{base_path}_placeholder.png")
+            image_service.write_placeholder_scene_image(
+                topic=req.topic,
+                keywords=s.keywords,
+                scene_index=s.index,
+                visual_style=req.visual_style,
+                aspect_ratio=req.aspect_ratio,
+                output_path=str(dest),
+                scene_text=s.text,
+            )
+            rp = str(dest.resolve())
+            image_paths.append(rp)
+            scenes_for_finalize.append(s.model_copy(update={"image_path": rp, "image_mode": "placeholder"}))
+
+    narr_source: Literal["tts", "upload"] = "tts"
+    narr_path_out: Optional[str] = None
+    if req.narration_source == "upload" and req.narration_audio_path:
+        audio_ok = _safe_resolved_file_under_dir(audio_dir, req.narration_audio_path)
+        if audio_ok:
+            audio_path = str(audio_ok)
+            narr_source = "upload"
+            narr_path_out = audio_path
+        else:
+            audio_path = tts_service.text_to_speech(
+                text=req.script_text,
+                output_dir=str(audio_dir),
+                filename="voiceover.mp3",
+            )
+    else:
+        audio_path = tts_service.text_to_speech(
+            text=req.script_text,
+            output_dir=str(audio_dir),
+            filename="voiceover.mp3",
+        )
 
     return _finalize_video_response(
         topic=req.topic,
         script_text=req.script_text,
-        scenes_ordered=scenes_ordered,
+        scenes_ordered=scenes_for_finalize,
         image_paths=image_paths,
         audio_path=audio_path,
         videos_dir=videos_dir,
@@ -290,6 +379,8 @@ def _regenerate_from_manual_request(req: ManualVideoRequest) -> VideoResponse:
         motion_effect=req.motion_effect,
         motion_intensity=req.motion_intensity,
         subtitle_style=req.subtitle_style,
+        narration_source=narr_source,
+        narration_audio_path=narr_path_out,
     )
 
 
@@ -350,6 +441,8 @@ def generate_video(req: VideoRequest):
         motion_effect=req.motion_effect,
         motion_intensity=req.motion_intensity,
         subtitle_style=req.subtitle_style,
+        narration_source="tts",
+        narration_audio_path=None,
     )
 
 
@@ -382,10 +475,16 @@ async def manual_video(request: Request):
       - topic (str)
       - script_text (str)
       - scenes_json (JSON array of Scene objects without image_url required)
+      - narration_source (optional): tts | upload
+      - narration_audio_path (optional str): when narration_source=upload and no audio_upload,
+        reuse this file if it resolves under the topic audio directory
       - visual_style (optional)
       - duration_seconds (optional, ignored for render but kept for API parity)
       - style (optional, ignored)
     Optional file fields per scene: scene_upload_{scene.index}
+    Per scene: scene_image_mode_{index} in {upload, generate, placeholder}.
+    If mode is upload with no new scene_upload file, an existing image_path on that scene
+    (under the topic images directory) is reused.
     """
     form = await request.form()
 
@@ -446,6 +545,7 @@ async def manual_video(request: Request):
 
     allowed_ext = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
     image_paths: List[str] = []
+    scene_image_modes_record: List[str] = []
 
     for s in scenes_ordered:
         key = f"scene_upload_{s.index}"
@@ -478,6 +578,7 @@ async def manual_video(request: Request):
                 dest = Path(generated[0]).resolve()
                 print(f"[manual-video] scene={s.index} using image path: {dest} (source=generate)")
                 image_paths.append(str(dest))
+                scene_image_modes_record.append("generate")
                 continue
             dest = Path(f"{base_path}_placeholder.png")
             image_service.write_placeholder_scene_image(
@@ -491,9 +592,11 @@ async def manual_video(request: Request):
             )
             print(f"[manual-video] scene={s.index} using image path: {dest.resolve()} (source=placeholder-from-generate-fallback)")
             image_paths.append(str(dest.resolve()))
+            scene_image_modes_record.append("placeholder")
             continue
 
         if mode == "upload" and is_upload and filename:
+            record_mode = "upload"
             suffix = Path(str(filename)).suffix.lower()
             if suffix not in allowed_ext:
                 suffix = ".png"
@@ -521,6 +624,7 @@ async def manual_video(request: Request):
                     f"[manual-video] scene={s.index} upload payload empty; "
                     f"using image path: {dest.resolve()} (source=placeholder)"
                 )
+                record_mode = "placeholder"
             else:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 with open(dest, "wb") as f:
@@ -542,6 +646,7 @@ async def manual_video(request: Request):
                         f"using image path: {fallback.resolve()} (source=placeholder-after-upload-check)"
                     )
                     dest = fallback
+                    record_mode = "placeholder"
                 else:
                     print(
                         f"[manual-video] scene={s.index} upload saved; "
@@ -549,9 +654,20 @@ async def manual_video(request: Request):
                     )
             # Ensure successful upload path is what enters renderer inputs.
             image_paths.append(str(dest.resolve()))
+            scene_image_modes_record.append(record_mode)
             continue
 
-        # placeholder mode or upload mode without a usable file
+        # upload mode with no new multipart file: reuse persisted path from scenes_json
+        if mode == "upload" and not (is_upload and filename):
+            safe_existing = _safe_resolved_file_under_dir(images_dir, s.image_path)
+            if safe_existing:
+                rp = str(safe_existing)
+                print(f"[manual-video] scene={s.index} reusing image_path: {rp} (source=upload-reuse)")
+                image_paths.append(rp)
+                scene_image_modes_record.append("upload")
+                continue
+
+        # placeholder mode or upload mode without a usable file or path
         dest = Path(f"{base_path}_placeholder.png")
         image_service.write_placeholder_scene_image(
             topic=topic,
@@ -564,50 +680,75 @@ async def manual_video(request: Request):
         )
         print(f"[manual-video] scene={s.index} using image path: {dest.resolve()} (source=placeholder)")
         image_paths.append(str(dest.resolve()))
+        scene_image_modes_record.append("placeholder")
+
+    scenes_ordered = [
+        orig.model_copy(update={"image_path": pth, "image_mode": m})
+        for orig, pth, m in zip(scenes_ordered, image_paths, scene_image_modes_record)
+    ]
 
     if narration_source == "upload":
         audio_files = form.getlist("audio_upload")
         audio_val = audio_files[0] if audio_files else None
         is_audio_upload = hasattr(audio_val, "filename") and hasattr(audio_val, "read")
         audio_filename = getattr(audio_val, "filename", None) if is_audio_upload else None
-        if not (is_audio_upload and audio_filename):
-            raise HTTPException(status_code=400, detail="audio_upload is required when narration_source='upload'.")
 
-        allowed_audio_ext = {".mp3", ".wav", ".m4a", ".aac", ".ogg"}
-        suffix = Path(str(audio_filename)).suffix.lower()
-        if suffix not in allowed_audio_ext:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported audio extension '{suffix}'. Allowed: {sorted(allowed_audio_ext)}",
-            )
+        if is_audio_upload and audio_filename:
+            allowed_audio_ext = {".mp3", ".wav", ".m4a", ".aac", ".ogg"}
+            suffix = Path(str(audio_filename)).suffix.lower()
+            if suffix not in allowed_audio_ext:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unsupported audio extension '{suffix}'. Allowed: {sorted(allowed_audio_ext)}",
+                )
 
-        uploaded_audio_path = (audio_dir / f"uploaded_narration{suffix}").resolve()
-        try:
-            audio_bytes = await audio_val.read()
-        except Exception as read_exc:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Could not read uploaded narration audio: {read_exc}",
-            ) from read_exc
+            uploaded_audio_path = (audio_dir / f"uploaded_narration{suffix}").resolve()
+            try:
+                audio_bytes = await audio_val.read()
+            except Exception as read_exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Could not read uploaded narration audio: {read_exc}",
+                ) from read_exc
 
-        uploaded_audio_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(uploaded_audio_path, "wb") as f:
-            f.write(audio_bytes or b"")
+            uploaded_audio_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(uploaded_audio_path, "wb") as f:
+                f.write(audio_bytes or b"")
 
-        if not uploaded_audio_path.exists() or uploaded_audio_path.stat().st_size <= 0:
-            raise HTTPException(
-                status_code=400,
-                detail="Uploaded narration audio is empty or could not be saved.",
-            )
+            if not uploaded_audio_path.exists() or uploaded_audio_path.stat().st_size <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Uploaded narration audio is empty or could not be saved.",
+                )
 
-        print(f"[manual-video] uploaded narration saved: {uploaded_audio_path}")
-        audio_path = str(uploaded_audio_path)
+            print(f"[manual-video] uploaded narration saved: {uploaded_audio_path}")
+            audio_path = str(uploaded_audio_path)
+        else:
+            path_raw = form.get("narration_audio_path")
+            path_str = path_raw.strip() if isinstance(path_raw, str) else ""
+            safe_narr = _safe_resolved_file_under_dir(audio_dir, path_str or None)
+            if not safe_narr:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "When narration_source='upload', send audio_upload or a valid "
+                        "narration_audio_path pointing to an existing file under your topic audio folder."
+                    ),
+                )
+            audio_path = str(safe_narr)
+            print(f"[manual-video] reusing narration from narration_audio_path: {audio_path}")
     else:
         audio_path = tts_service.text_to_speech(
             text=script_text,
             output_dir=str(audio_dir),
             filename="voiceover.mp3",
         )
+
+    narr_resp_source: Optional[Literal["tts", "upload"]] = "tts"
+    narr_resp_path: Optional[str] = None
+    if narration_source == "upload":
+        narr_resp_source = "upload"
+        narr_resp_path = audio_path
 
     return _finalize_video_response(
         topic=topic,
@@ -624,6 +765,8 @@ async def manual_video(request: Request):
         motion_effect=motion_effect,
         motion_intensity=motion_intensity,
         subtitle_style=subtitle_style,
+        narration_source=narr_resp_source,
+        narration_audio_path=narr_resp_path,
     )
 
 
