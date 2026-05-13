@@ -35,6 +35,8 @@ type MotionEffect = 'none' | 'gentle_zoom' | 'slow_pan' | 'ken_burns'
 
 type MotionIntensity = 'subtle' | 'medium' | 'strong'
 
+type SubtitleStyle = 'off' | 'minimal' | 'cinematic' | 'shorts'
+
 function roundToHalfSecond(value: number): number {
   return Math.max(0.5, Math.round(value * 2) / 2)
 }
@@ -169,6 +171,7 @@ export const App: React.FC = () => {
   const [backgroundMusicVolume, setBackgroundMusicVolume] = useState(0.12)
   const [motionEffect, setMotionEffect] = useState<MotionEffect>('gentle_zoom')
   const [motionIntensity, setMotionIntensity] = useState<MotionIntensity>('subtle')
+  const [subtitleStyle, setSubtitleStyle] = useState<SubtitleStyle>('off')
   const [editedScenes, setEditedScenes] = useState<Scene[]>([])
   const [manualUploads, setManualUploads] = useState<Record<number, File | undefined>>({})
   const [manualImageModes, setManualImageModes] = useState<Record<number, ManualImageMode>>({})
@@ -262,6 +265,7 @@ export const App: React.FC = () => {
           background_music_volume: backgroundMusicVolume,
           motion_effect: motionEffect,
           motion_intensity: motionIntensity,
+          subtitle_style: subtitleStyle,
         }),
       })
 
@@ -331,6 +335,7 @@ export const App: React.FC = () => {
       fd.append('background_music_volume', String(backgroundMusicVolume))
       fd.append('motion_effect', motionEffect)
       fd.append('motion_intensity', motionIntensity)
+      fd.append('subtitle_style', subtitleStyle)
       fd.append('narration_source', manualNarrationSource)
       if (manualNarrationSource === 'upload' && manualAudioUpload) {
         fd.append('audio_upload', manualAudioUpload)
@@ -415,6 +420,7 @@ export const App: React.FC = () => {
           background_music_volume: backgroundMusicVolume,
           motion_effect: motionEffect,
           motion_intensity: motionIntensity,
+          subtitle_style: subtitleStyle,
         }),
       })
 
@@ -1255,6 +1261,23 @@ export const App: React.FC = () => {
               </select>
               <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
                 Controls how noticeable the image movement feels.
+              </p>
+            </div>
+
+            <div>
+              <div className="field-label">Subtitles</div>
+              <select
+                className="select input-full"
+                value={subtitleStyle}
+                onChange={e => setSubtitleStyle(e.target.value as SubtitleStyle)}
+              >
+                <option value="off">Off</option>
+                <option value="minimal">Minimal</option>
+                <option value="cinematic">Cinematic</option>
+                <option value="shorts">Shorts style</option>
+              </select>
+              <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
+                Subtitles are automatically split into readable chunks during each scene.
               </p>
             </div>
 

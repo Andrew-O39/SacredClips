@@ -17,6 +17,7 @@ from .schemas import (
     MotionEffect,
     MotionIntensity,
     Scene,
+    SubtitleStyle,
     VideoRequest,
     VideoResponse,
     VisualStyle,
@@ -88,6 +89,7 @@ _image_fit_mode_adapter = TypeAdapter(ImageFitMode)
 _background_music_adapter = TypeAdapter(BackgroundMusic)
 _motion_effect_adapter = TypeAdapter(MotionEffect)
 _motion_intensity_adapter = TypeAdapter(MotionIntensity)
+_subtitle_style_adapter = TypeAdapter(SubtitleStyle)
 
 
 def _normalize_visual_style(value: object) -> VisualStyle:
@@ -151,6 +153,13 @@ def _normalize_motion_intensity(value: object) -> MotionIntensity:
         return "subtle"
 
 
+def _normalize_subtitle_style(value: object) -> SubtitleStyle:
+    try:
+        return _subtitle_style_adapter.validate_python(value)
+    except ValidationError:
+        return "off"
+
+
 def _clamp_background_music_volume(raw: object) -> float:
     if raw is None or raw == "":
         return 0.12
@@ -207,8 +216,13 @@ def _finalize_video_response(
     background_music_volume: float = 0.12,
     motion_effect: MotionEffect = "gentle_zoom",
     motion_intensity: MotionIntensity = "subtle",
+    subtitle_style: SubtitleStyle = "off",
 ) -> VideoResponse:
     scene_durations = [s.duration_seconds for s in scenes_ordered]
+    subtitle_texts = [s.text for s in scenes_ordered]
+    while len(subtitle_texts) < len(image_paths):
+        subtitle_texts.append("")
+    subtitle_texts = subtitle_texts[: len(image_paths)]
     video_path = video_service.render_video(
         image_paths=image_paths,
         audio_path=audio_path,
@@ -221,6 +235,8 @@ def _finalize_video_response(
         background_music_volume=background_music_volume,
         motion_effect=motion_effect,
         motion_intensity=motion_intensity,
+        subtitle_style=subtitle_style,
+        subtitle_texts=subtitle_texts,
     )
     abs_video_path = Path(video_path).resolve()
     rel_to_media = abs_video_path.relative_to(media_root)
@@ -273,6 +289,7 @@ def _regenerate_from_manual_request(req: ManualVideoRequest) -> VideoResponse:
         background_music_volume=req.background_music_volume,
         motion_effect=req.motion_effect,
         motion_intensity=req.motion_intensity,
+        subtitle_style=req.subtitle_style,
     )
 
 
@@ -294,6 +311,7 @@ def generate_video(req: VideoRequest):
         background_music_volume=req.background_music_volume,
         motion_effect=req.motion_effect,
         motion_intensity=req.motion_intensity,
+        subtitle_style=req.subtitle_style,
     )
     script_text, scenes_raw, used_ai = script_service.generate_script(req_for_script)
     scenes_ordered = [_strip_scene_for_render(s) for s in _sort_scenes(scenes_raw)]
@@ -331,6 +349,7 @@ def generate_video(req: VideoRequest):
         background_music_volume=req.background_music_volume,
         motion_effect=req.motion_effect,
         motion_intensity=req.motion_intensity,
+        subtitle_style=req.subtitle_style,
     )
 
 
@@ -420,6 +439,7 @@ async def manual_video(request: Request):
     background_music_volume = _clamp_background_music_volume(form.get("background_music_volume"))
     motion_effect = _normalize_motion_effect(form.get("motion_effect"))
     motion_intensity = _normalize_motion_intensity(form.get("motion_intensity"))
+    subtitle_style = _normalize_subtitle_style(form.get("subtitle_style"))
 
     _, audio_dir, images_dir, videos_dir = _prepare_topic_dirs(topic)
     scenes_ordered = [_strip_scene_for_render(s) for s in _sort_scenes(scene_models)]
@@ -603,6 +623,7 @@ async def manual_video(request: Request):
         background_music_volume=background_music_volume,
         motion_effect=motion_effect,
         motion_intensity=motion_intensity,
+        subtitle_style=subtitle_style,
     )
 
 
