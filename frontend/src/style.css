@@ -593,6 +593,19 @@ body {
   margin-top: 0.5rem;
 }
 
+/* Shared element for per-scene narration segment preview (no visible controls). */
+.scene-audio-preview-hidden {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .scene-cut-list {
   list-style: none;
   margin-top: 0.35rem;

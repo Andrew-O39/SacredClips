@@ -1142,6 +1142,118 @@ def _attach_audio_and_write(
             pass
 
 
+def render_scene_preview(
+    *,
+    image_path: str,
+    output_path: str,
+    scene_duration: float,
+    aspect_ratio: str,
+    image_fit_mode: str,
+    background_music: str,
+    background_music_volume: float,
+    motion_effect: str,
+    motion_intensity: str,
+    subtitle_style: str,
+    subtitle_text: str,
+    full_narration_path: Optional[str],
+    narration_start_sec: float,
+) -> str:
+    """
+    Render one scene to MP4: image + motion + optional subtitles + narration slice + optional music.
+
+    narration_start_sec is the offset in the full narration file that aligns with this scene's
+    start in the multi-scene timeline (sum of prior scene durations).
+    """
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    d = max(float(scene_duration), MIN_SCENE_CLIP)
+    mi = _normalize_motion_intensity(motion_intensity)
+    ss = _normalize_subtitle_style(subtitle_style)
+    width, height = _aspect_resolution(aspect_ratio)
+    W, H = int(width), int(height)
+
+    if not image_path or not os.path.isfile(image_path) or os.path.getsize(image_path) <= 0:
+        raise RuntimeError("render_scene_preview: invalid image_path")
+
+    base_clip = _frame_image_clip(
+        image_path,
+        d,
+        W,
+        H,
+        image_fit_mode,
+        motion_effect=motion_effect,
+        scene_index=1,
+        motion_intensity=mi,
+    )
+    video = _maybe_composite_subtitles(
+        base_clip, subtitle_text, d, W, H, ss, aspect_ratio
+    )
+
+    narration_clip: AudioFileClip | None = None
+    fp = full_narration_path
+    if fp and os.path.isfile(fp) and os.path.getsize(fp) > 0:
+        try:
+            src = AudioFileClip(fp)
+            total = float(src.duration or 0.0)
+            if total > 0.05:
+                t0 = max(0.0, float(narration_start_sec))
+                t0 = min(t0, max(0.0, total - 0.05))
+                t1 = min(t0 + d, total)
+                if t1 > t0 + 0.04:
+                    narration_clip = _subclip_compat(src, t0, t1)
+                else:
+                    try:
+                        src.close()
+                    except Exception:
+                        pass
+            else:
+                try:
+                    src.close()
+                except Exception:
+                    pass
+        except Exception as exc:
+            print(f"[render_scene_preview] could not load/slice narration: {exc}")
+            traceback.print_exc()
+
+    vd = max(MIN_SCENE_CLIP, float(video.duration))
+    final_audio, _ = _compose_final_audio(
+        narration_clip,
+        vd,
+        background_music,
+        background_music_volume,
+    )
+
+    if final_audio is not None:
+        try:
+            video = video.with_audio(final_audio)
+        except AttributeError:
+            video = video.set_audio(final_audio)
+
+    write_kw: dict = {"fps": 24, "codec": "libx264"}
+    if final_audio is not None:
+        write_kw["audio_codec"] = "aac"
+    else:
+        write_kw["audio"] = False
+
+    video.write_videofile(output_path, **write_kw)
+
+    try:
+        video.close()
+    except Exception:
+        pass
+    if final_audio is not None:
+        try:
+            final_audio.close()
+        except Exception:
+            pass
+    if narration_clip is not None:
+        try:
+            narration_clip.close()
+        except Exception:
+            pass
+
+    return output_path
+
+
 def render_video(
     image_paths: List[str],
     audio_path: str,

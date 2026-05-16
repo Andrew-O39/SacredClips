@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useMemo } from 'react'
 
 const API_BASE_URL = 'http://localhost:8000'
 
@@ -131,6 +131,15 @@ function formatAudioSeconds(sec: number): string {
   return `${sec.toFixed(2)} s`
 }
 
+/** mm:ss for scene narration range labels (pairs with formatAudioSeconds in the timing assistant). */
+function formatAudioMmSs(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) return '00:00'
+  const totalSec = Math.floor(sec + 1e-6)
+  const m = Math.floor(totalSec / 60)
+  const s = totalSec % 60
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+}
+
 const BACKGROUND_MUSIC_PREVIEW_FILES: Record<
   Exclude<BackgroundMusic, 'none'>,
   string
@@ -155,6 +164,11 @@ type VideoResponse = {
   used_ai: boolean
   narration_source?: ManualNarrationSource | null
   narration_audio_path?: string | null
+}
+
+type PreviewSceneResponse = {
+  preview_video_path: string
+  preview_video_url: string
 }
 
 type YouTubeAuthStatus = {
@@ -197,13 +211,21 @@ export const App: React.FC = () => {
   /** Post-render manual only: new image files to send via multipart /manual-video. */
   const [replacementUploads, setReplacementUploads] = useState<Record<number, File | undefined>>({})
   const [replacementPreviewUrls, setReplacementPreviewUrls] = useState<Record<number, string>>({})
+  const [scenePreviewUrlByIndex, setScenePreviewUrlByIndex] = useState<Record<number, string>>({})
+  const [scenePreviewLoadingIndex, setScenePreviewLoadingIndex] = useState<number | null>(null)
+  const [scenePreviewNonce, setScenePreviewNonce] = useState(0)
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  /** Shared element for manual per-scene narration segment preview (upload mode only). */
+  const sceneAudioPreviewRef = useRef<HTMLAudioElement | null>(null)
+  const sceneSegmentEndRef = useRef<number | null>(null)
   const musicPreviewRef = useRef<HTMLAudioElement | null>(null)
   const [uploadedAudioUrl, setUploadedAudioUrl] = useState('')
   const [uploadedAudioDuration, setUploadedAudioDuration] = useState(0)
   const [uploadedAudioCurrentTime, setUploadedAudioCurrentTime] = useState(0)
   const [sceneCutTimes, setSceneCutTimes] = useState<number[]>([])
+  const [activeAudioSceneIndex, setActiveAudioSceneIndex] = useState<number | null>(null)
+  const [sceneAudioPreviewPlaying, setSceneAudioPreviewPlaying] = useState(false)
 
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -229,9 +251,85 @@ export const App: React.FC = () => {
   const totalSceneDuration = editedScenes.reduce((acc, s) => acc + (Number.isFinite(s.duration_seconds) ? s.duration_seconds : 0), 0)
   const durationDiff = Math.abs(totalSceneDuration - duration)
   const hasDurationWarning = durationDiff > 10
+
+  const manualSceneAudioRangesByIndex = useMemo(() => {
+    const m: Record<number, { start: number; end: number }> = {}
+    if (!editedScenes.length) return m
+    const sorted = [...editedScenes].sort((a, b) => a.index - b.index)
+    let t = 0
+    for (const s of sorted) {
+      const dur = Number.isFinite(s.duration_seconds) ? Math.max(0, s.duration_seconds) : 0
+      m[s.index] = { start: t, end: t + dur }
+      t += dur
+    }
+    return m
+  }, [editedScenes])
+
   const durationMin = videoType === 'normal' ? 120 : 60
   const durationMax = videoType === 'normal' ? 600 : 90
   const durationStep = videoType === 'normal' ? 30 : 5
+
+  function stopManualSceneAudioPreview() {
+    const el = sceneAudioPreviewRef.current
+    if (el) {
+      el.pause()
+      try {
+        el.currentTime = 0
+      } catch {
+        /* ignore */
+      }
+    }
+    sceneSegmentEndRef.current = null
+    setActiveAudioSceneIndex(null)
+    setSceneAudioPreviewPlaying(false)
+  }
+
+  function onScenePreviewAudioTimeUpdate() {
+    const el = sceneAudioPreviewRef.current
+    const segEnd = sceneSegmentEndRef.current
+    if (!el || segEnd == null) return
+    if (el.currentTime >= segEnd - 0.04) {
+      el.pause()
+      sceneSegmentEndRef.current = null
+      setActiveAudioSceneIndex(null)
+      setSceneAudioPreviewPlaying(false)
+    }
+  }
+
+  function toggleManualSceneAudioPreview(sceneIndex: number) {
+    const range = manualSceneAudioRangesByIndex[sceneIndex]
+    const el = sceneAudioPreviewRef.current
+    if (!range || !uploadedAudioUrl || !el) return
+
+    if (activeAudioSceneIndex === sceneIndex && sceneAudioPreviewPlaying) {
+      stopManualSceneAudioPreview()
+      return
+    }
+
+    const assistant = audioRef.current
+    if (assistant && !assistant.paused) assistant.pause()
+
+    el.pause()
+    const { start, end } = range
+    sceneSegmentEndRef.current = end
+    el.currentTime = start
+    const playPromise = el.play()
+    if (playPromise !== undefined) {
+      playPromise
+        .then(() => {
+          setActiveAudioSceneIndex(sceneIndex)
+          setSceneAudioPreviewPlaying(true)
+        })
+        .catch(() => {
+          sceneSegmentEndRef.current = null
+          setActiveAudioSceneIndex(null)
+          setSceneAudioPreviewPlaying(false)
+        })
+    } else {
+      setActiveAudioSceneIndex(sceneIndex)
+      setSceneAudioPreviewPlaying(true)
+    }
+  }
 
   const beginGenerationProgress = (profile: GenerationProfile) => {
     setGenerationProfile(profile)
@@ -259,6 +357,11 @@ export const App: React.FC = () => {
     setReplacementUploads({})
   }
 
+  const clearScenePreviews = () => {
+    setScenePreviewUrlByIndex({})
+    setScenePreviewLoadingIndex(null)
+  }
+
   const updateReplacementUploadForScene = (sceneIndex: number, file: File | undefined) => {
     setReplacementPreviewUrls(prev => {
       const old = prev[sceneIndex]
@@ -283,6 +386,7 @@ export const App: React.FC = () => {
   }
 
   const resetToNewVideo = () => {
+    stopManualSceneAudioPreview()
     setResult(null)
     setEditedScript('')
     setEditedScenes([])
@@ -291,6 +395,7 @@ export const App: React.FC = () => {
     setManualAudioUpload(undefined)
     setPersistedManualNarration(null)
     clearReplacementUploadState()
+    clearScenePreviews()
     setVideoVersion(0)
     setYoutubeSuccessUrl(null)
     setYoutubeError(null)
@@ -347,6 +452,7 @@ export const App: React.FC = () => {
       setManualUploads({})
       setManualImageModes({})
       setPersistedManualNarration(null)
+      clearScenePreviews()
     } catch (err: any) {
       console.error(err)
       setError(err.message || 'Something went wrong')
@@ -373,6 +479,7 @@ export const App: React.FC = () => {
     clearReplacementUploadState()
     beginGenerationProgress(manualNarrationSource === 'upload' ? 'manual_upload' : 'manual_tts')
     setLoading(true)
+    stopManualSceneAudioPreview()
     setYoutubeError(null)
     setYoutubeSuccessUrl(null)
     try {
@@ -442,6 +549,7 @@ export const App: React.FC = () => {
           ? { source: 'upload', path: data.narration_audio_path }
           : null,
       )
+      clearScenePreviews()
     } catch (err: any) {
       console.error(err)
       setError(err.message || 'Something went wrong')
@@ -493,6 +601,7 @@ export const App: React.FC = () => {
             : null,
         )
         clearReplacementUploadState()
+        clearScenePreviews()
       }
 
       if (hasReplacementFiles) {
@@ -591,6 +700,65 @@ export const App: React.FC = () => {
     }
   }
 
+  const handlePreviewScene = async (sceneIndex: number) => {
+    if (!result || !editedScenes.length) return
+    const timelineScript = editedScenes
+      .map(s => s.text.trim())
+      .filter(Boolean)
+      .join('\n\n')
+    if (!timelineScript.trim()) {
+      setError('Add scene text before previewing.')
+      return
+    }
+    setError(null)
+    setScenePreviewLoadingIndex(sceneIndex)
+    try {
+      const payload = {
+        topic,
+        scene_index: sceneIndex,
+        style,
+        script_text: timelineScript.trim().length ? timelineScript : 'Preview',
+        scenes: scenesForApiPayload(editedScenes),
+        visual_style: visualStyle,
+        aspect_ratio: aspectRatio,
+        image_fit_mode: imageFitMode,
+        background_music: backgroundMusic,
+        background_music_volume: backgroundMusicVolume,
+        motion_effect: motionEffect,
+        motion_intensity: motionIntensity,
+        subtitle_style: subtitleStyle,
+        narration_source: persistedManualNarration ? ('upload' as const) : ('tts' as const),
+        narration_audio_path: persistedManualNarration?.path,
+      }
+      const rep = replacementUploads[sceneIndex]
+      let res: Response
+      if (rep) {
+        const fd = new FormData()
+        fd.append('payload', JSON.stringify(payload))
+        fd.append('preview_image', rep)
+        res = await fetch(`${API_BASE_URL}/preview-scene`, { method: 'POST', body: fd })
+      } else {
+        res = await fetch(`${API_BASE_URL}/preview-scene`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+      }
+      if (!res.ok) {
+        const text = await res.text()
+        throw new Error(text || 'Preview failed')
+      }
+      const data: PreviewSceneResponse = await res.json()
+      setScenePreviewUrlByIndex(prev => ({ ...prev, [sceneIndex]: data.preview_video_url }))
+      setScenePreviewNonce(n => n + 1)
+    } catch (err: any) {
+      console.error(err)
+      setError(err.message || 'Scene preview failed')
+    } finally {
+      setScenePreviewLoadingIndex(null)
+    }
+  }
+
   const handleCreationModeChange = (m: CreationMode) => {
     setCreationMode(m)
     setError(null)
@@ -628,6 +796,7 @@ export const App: React.FC = () => {
   }
 
   const addManualScene = () => {
+    stopManualSceneAudioPreview()
     const base = reindexScenes(editedScenes)
     setEditedScenes([
       ...base,
@@ -642,6 +811,7 @@ export const App: React.FC = () => {
   }
 
   const removeManualScene = (sceneIndex: number) => {
+    stopManualSceneAudioPreview()
     if (editedScenes.length <= 1) return
     const filteredOld = editedScenes.filter(s => s.index !== sceneIndex)
     const reindexed = reindexScenes(filteredOld)
@@ -659,6 +829,7 @@ export const App: React.FC = () => {
   }
 
   const duplicateManualScene = (sceneIndex: number) => {
+    stopManualSceneAudioPreview()
     const idx = editedScenes.findIndex(s => s.index === sceneIndex)
     if (idx < 0) return
     const source = editedScenes[idx]
@@ -701,6 +872,7 @@ export const App: React.FC = () => {
       return copy.map((scene, i) => ({ ...scene, index: i + 1 }))
     })
     clearReplacementUploadState()
+    clearScenePreviews()
   }
 
   /** Post-generation timeline: insert a blank placeholder scene after this index and reindex. */
@@ -730,6 +902,7 @@ export const App: React.FC = () => {
       return reindexScenes(nextRaw)
     })
     clearReplacementUploadState()
+    clearScenePreviews()
   }
 
   /** Post-generation: duplicate scene (including image_path for shared uploads); reindex. */
@@ -751,6 +924,7 @@ export const App: React.FC = () => {
       return reindexScenes(nextRaw)
     })
     clearReplacementUploadState()
+    clearScenePreviews()
   }
 
   /** Post-generation: remove scene if more than one remains; reindex. */
@@ -760,6 +934,7 @@ export const App: React.FC = () => {
       return reindexScenes(prev.filter(s => s.index !== sceneIndex))
     })
     clearReplacementUploadState()
+    clearScenePreviews()
   }
 
   const handleCopyScript = async () => {
@@ -955,6 +1130,7 @@ export const App: React.FC = () => {
       creationMode === 'manual' && manualNarrationSource === 'upload' && manualAudioUpload != null
 
     if (!shouldPreview) {
+      stopManualSceneAudioPreview()
       setUploadedAudioUrl('')
       setUploadedAudioDuration(0)
       setUploadedAudioCurrentTime(0)
@@ -969,9 +1145,38 @@ export const App: React.FC = () => {
     setUploadedAudioCurrentTime(0)
 
     return () => {
+      stopManualSceneAudioPreview()
       URL.revokeObjectURL(url)
     }
   }, [creationMode, manualNarrationSource, manualAudioUpload])
+
+  useEffect(() => {
+    if (activeAudioSceneIndex == null) return
+    if (!editedScenes.some(s => s.index === activeAudioSceneIndex)) {
+      stopManualSceneAudioPreview()
+      return
+    }
+    const sorted = [...editedScenes].sort((a, b) => a.index - b.index)
+    let t = 0
+    let r: { start: number; end: number } | null = null
+    for (const s of sorted) {
+      const dur = Number.isFinite(s.duration_seconds) ? Math.max(0, s.duration_seconds) : 0
+      if (s.index === activeAudioSceneIndex) {
+        r = { start: t, end: t + dur }
+        break
+      }
+      t += dur
+    }
+    if (!r) {
+      stopManualSceneAudioPreview()
+      return
+    }
+    sceneSegmentEndRef.current = r.end
+    const el = sceneAudioPreviewRef.current
+    if (el && !el.paused && el.currentTime >= r.end - 0.05) {
+      stopManualSceneAudioPreview()
+    }
+  }, [editedScenes, activeAudioSceneIndex])
 
   const syncAudioDurationFromElement = () => {
     const el = audioRef.current
@@ -1007,6 +1212,7 @@ export const App: React.FC = () => {
   }
 
   const applySceneCutsToScenes = () => {
+    stopManualSceneAudioPreview()
     const el = audioRef.current
     const fromEl = el?.duration
     const total =
@@ -1261,18 +1467,33 @@ export const App: React.FC = () => {
                         </p>
                         <div className="result-block result-block--expanded">
                           {uploadedAudioUrl ? (
-                            <audio
-                              key={uploadedAudioUrl}
-                              ref={audioRef}
-                              src={uploadedAudioUrl}
-                              controls
-                              onLoadedMetadata={syncAudioDurationFromElement}
-                              onDurationChange={syncAudioDurationFromElement}
-                              onTimeUpdate={syncAudioCurrentTimeFromElement}
-                              onSeeking={syncAudioCurrentTimeFromElement}
-                              onSeeked={syncAudioCurrentTimeFromElement}
-                              className="timing-assistant-audio"
-                            />
+                            <>
+                              <audio
+                                key={uploadedAudioUrl}
+                                ref={audioRef}
+                                src={uploadedAudioUrl}
+                                controls
+                                onPlay={stopManualSceneAudioPreview}
+                                onLoadedMetadata={syncAudioDurationFromElement}
+                                onDurationChange={syncAudioDurationFromElement}
+                                onTimeUpdate={syncAudioCurrentTimeFromElement}
+                                onSeeking={syncAudioCurrentTimeFromElement}
+                                onSeeked={syncAudioCurrentTimeFromElement}
+                                className="timing-assistant-audio"
+                              />
+                              {creationMode === 'manual' &&
+                                manualNarrationSource === 'upload' &&
+                                editedScenes.length > 0 && (
+                                  <audio
+                                    ref={sceneAudioPreviewRef}
+                                    key={`scene-seg-${uploadedAudioUrl}`}
+                                    src={uploadedAudioUrl}
+                                    preload="auto"
+                                    className="scene-audio-preview-hidden"
+                                    onTimeUpdate={onScenePreviewAudioTimeUpdate}
+                                  />
+                                )}
+                            </>
                           ) : (
                             <p className="footer-hint" style={{ marginTop: '0.5rem' }}>
                               Preparing audio preview…
@@ -1577,6 +1798,30 @@ export const App: React.FC = () => {
                             })
                           }
                         />
+                        {creationMode === 'manual' &&
+                          manualNarrationSource === 'upload' &&
+                          manualAudioUpload &&
+                          !result &&
+                          editedScenes.length > 0 &&
+                          manualSceneAudioRangesByIndex[scene.index] != null && (
+                            <div style={{ marginTop: '0.45rem' }}>
+                              <p className="footer-hint" style={{ marginTop: 0, marginBottom: '0.3rem' }}>
+                                Scene audio:{' '}
+                                {formatAudioMmSs(manualSceneAudioRangesByIndex[scene.index]!.start)} →{' '}
+                                {formatAudioMmSs(manualSceneAudioRangesByIndex[scene.index]!.end)}
+                              </p>
+                              <button
+                                type="button"
+                                className="tiny-button"
+                                disabled={!uploadedAudioUrl || loading}
+                                onClick={() => toggleManualSceneAudioPreview(scene.index)}
+                              >
+                                {activeAudioSceneIndex === scene.index && sceneAudioPreviewPlaying
+                                  ? 'Stop audio'
+                                  : 'Play scene audio'}
+                              </button>
+                            </div>
+                          )}
                         <div className="field-label" style={{ marginTop: '0.35rem' }}>
                           Image source
                         </div>
@@ -1901,6 +2146,27 @@ export const App: React.FC = () => {
                             ) : null}
                           </div>
                         )}
+                        <div style={{ marginTop: '0.5rem' }}>
+                          <button
+                            type="button"
+                            className="tiny-button"
+                            onClick={() => void handlePreviewScene(scene.index)}
+                            disabled={loading || scenePreviewLoadingIndex === scene.index}
+                          >
+                            {scenePreviewLoadingIndex === scene.index ? 'Rendering preview…' : 'Preview scene'}
+                          </button>
+                          {scenePreviewUrlByIndex[scene.index] ? (
+                            <div style={{ marginTop: '0.45rem' }}>
+                              <div className="field-label">Scene preview</div>
+                              <video
+                                key={`scpv-${scene.index}-${scenePreviewNonce}`}
+                                controls
+                                style={{ width: '100%', maxHeight: 220, marginTop: '0.25rem', borderRadius: 6 }}
+                                src={`${API_BASE_URL}${scenePreviewUrlByIndex[scene.index]}?pv=${scenePreviewNonce}`}
+                              />
+                            </div>
+                          ) : null}
+                        </div>
                       </div>
                     ))}
                   </div>

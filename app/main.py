@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +16,8 @@ from .schemas import (
     ManualVideoRequest,
     MotionEffect,
     MotionIntensity,
+    PreviewSceneRequest,
+    PreviewSceneResponse,
     Scene,
     SubtitleStyle,
     VideoRequest,
@@ -185,6 +187,62 @@ def _strip_scene_for_render(s: Scene) -> Scene:
         image_mode=s.image_mode,
         image_path=s.image_path,
     )
+
+
+def _media_url_to_local_path(url: str | None) -> Path | None:
+    """Map a /media/... URL from our API to an absolute path under media_root, if the file exists."""
+    if not url or not isinstance(url, str):
+        return None
+    u = url.strip()
+    if not u.startswith("/media/"):
+        return None
+    rel = u[len("/media/") :].lstrip("/")
+    try:
+        p = (media_root / rel).resolve()
+        p.relative_to(media_root.resolve())
+        if p.is_file() and p.stat().st_size > 0:
+            return p
+    except Exception:
+        return None
+    return None
+
+
+async def _parse_preview_scene_request(request: Request) -> tuple[PreviewSceneRequest, Any]:
+    """JSON body, or multipart with form field `payload` (JSON string) and optional `preview_image` file."""
+    ct = (request.headers.get("content-type") or "").lower()
+    if "multipart/form-data" in ct:
+        form = await request.form()
+        raw = form.get("payload")
+        if not isinstance(raw, str):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="multipart preview requires form field 'payload' (JSON string)",
+            )
+        try:
+            data = PreviewSceneRequest.model_validate_json(raw)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=exc.errors(),
+            ) from exc
+        up = form.get("preview_image")
+        upload = up if up is not None and hasattr(up, "read") else None
+        return data, upload
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid JSON body",
+        ) from exc
+    try:
+        data = PreviewSceneRequest.model_validate(body)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=exc.errors(),
+        ) from exc
+    return data, None
 
 
 def _path_to_media_url(abs_img: Path) -> str:
@@ -465,6 +523,115 @@ def generate_video_from_scenes(req: ManualVideoRequest):
     Same payload as /generate-video-from-script: rebuild from edited scene cards + script text.
     """
     return _regenerate_from_manual_request(req)
+
+
+@app.post("/preview-scene", response_model=PreviewSceneResponse)
+async def preview_scene(request: Request):
+    """
+    Render a single-scene MP4 for quick preview: image + motion + subtitles + narration slice + optional music.
+
+    JSON body (`PreviewSceneRequest`), or multipart with form field `payload` (JSON string) and optional
+    `preview_image` file to override the scene image for this preview only.
+    """
+    data, upload = await _parse_preview_scene_request(request)
+    topic_dir, audio_dir, images_dir, videos_dir = _prepare_topic_dirs(data.topic)
+    previews_dir = topic_dir / "previews"
+    previews_dir.mkdir(parents=True, exist_ok=True)
+
+    scenes_ordered = [_strip_scene_for_render(s) for s in _sort_scenes(data.scenes)]
+    selected: Scene | None = None
+    for s in scenes_ordered:
+        if s.index == data.scene_index:
+            selected = s
+            break
+    if selected is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="scene_index not found in scenes")
+
+    scene_start = 0.0
+    for s in scenes_ordered:
+        if s.index == data.scene_index:
+            break
+        scene_start += float(s.duration_seconds)
+
+    scene_duration = max(float(video_service.MIN_SCENE_CLIP), float(selected.duration_seconds))
+
+    img_path_res: Path | None = None
+    if upload is not None:
+        filename = getattr(upload, "filename", None) or "preview.png"
+        suffix = Path(str(filename)).suffix.lower()
+        if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+            suffix = ".png"
+        dest = previews_dir / f"scene_{data.scene_index}_preview_input{suffix}"
+        try:
+            raw = await upload.read()
+        except Exception as read_exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Could not read preview_image: {read_exc}",
+            ) from read_exc
+        if raw:
+            dest.write_bytes(raw)
+            if dest.exists() and dest.stat().st_size > 0:
+                img_path_res = dest.resolve()
+
+    if img_path_res is None:
+        safe_img = _safe_resolved_file_under_dir(images_dir, selected.image_path)
+        if safe_img:
+            img_path_res = safe_img
+
+    if img_path_res is None and selected.image_url:
+        url_path = _media_url_to_local_path(selected.image_url)
+        if url_path:
+            img_path_res = url_path
+
+    if img_path_res is None:
+        ph = previews_dir / f"_preview_placeholder_scene_{data.scene_index}.png"
+        image_service.write_placeholder_scene_image(
+            topic=data.topic,
+            keywords=list(selected.keywords or ["scene"]),
+            scene_index=selected.index,
+            visual_style=str(data.visual_style),
+            aspect_ratio=str(data.aspect_ratio),
+            output_path=str(ph),
+            scene_text=selected.text,
+        )
+        img_path_res = ph.resolve()
+
+    narr_path_obj: Path | None = None
+    src_mode = (data.narration_source or "").strip().lower()
+    if src_mode == "upload" and data.narration_audio_path:
+        narr_path_obj = _safe_resolved_file_under_dir(audio_dir, data.narration_audio_path)
+    elif src_mode == "tts" or not src_mode:
+        vo = (audio_dir / "voiceover.mp3").resolve()
+        try:
+            vo.relative_to(audio_dir.resolve())
+            if vo.is_file() and vo.stat().st_size > 0:
+                narr_path_obj = vo
+        except Exception:
+            pass
+
+    out_mp4 = previews_dir / f"scene_{data.scene_index}_preview.mp4"
+    video_service.render_scene_preview(
+        image_path=str(img_path_res),
+        output_path=str(out_mp4),
+        scene_duration=scene_duration,
+        aspect_ratio=str(data.aspect_ratio),
+        image_fit_mode=str(data.image_fit_mode),
+        background_music=str(data.background_music),
+        background_music_volume=float(data.background_music_volume),
+        motion_effect=str(data.motion_effect),
+        motion_intensity=str(data.motion_intensity),
+        subtitle_style=str(data.subtitle_style),
+        subtitle_text=selected.text,
+        full_narration_path=str(narr_path_obj) if narr_path_obj else None,
+        narration_start_sec=scene_start,
+    )
+
+    abs_out = out_mp4.resolve()
+    return PreviewSceneResponse(
+        preview_video_path=str(abs_out),
+        preview_video_url=_path_to_media_url(abs_out),
+    )
 
 
 @app.post("/manual-video", response_model=VideoResponse)

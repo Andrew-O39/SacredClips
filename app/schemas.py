@@ -79,6 +79,31 @@ class ManualVideoRequest(BaseModel):
     narration_audio_path: Optional[str] = None
 
 
+class PreviewSceneResponse(BaseModel):
+    preview_video_path: str
+    preview_video_url: str
+
+
+class PreviewSceneRequest(BaseModel):
+    """Single-scene preview render (uses edited scene list + narration timeline)."""
+
+    topic: str = Field(min_length=1)
+    scene_index: int = Field(ge=1)
+    style: str = Field(min_length=1)
+    script_text: str = Field(min_length=1)
+    scenes: List[Scene] = Field(min_length=1)
+    visual_style: VisualStyle = "Classical sacred art"
+    aspect_ratio: AspectRatio = "16:9"
+    image_fit_mode: ImageFitMode = "fit"
+    background_music: BackgroundMusic = "none"
+    background_music_volume: float = Field(default=0.12, ge=0.0, le=0.5)
+    motion_effect: MotionEffect = "gentle_zoom"
+    motion_intensity: MotionIntensity = "subtle"
+    subtitle_style: SubtitleStyle = "off"
+    narration_source: Optional[Literal["tts", "upload"]] = None
+    narration_audio_path: Optional[str] = None
+
+
 class VideoResponse(BaseModel):
     video_path: str
     video_url: str
