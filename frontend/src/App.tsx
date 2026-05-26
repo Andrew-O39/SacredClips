@@ -385,6 +385,11 @@ export const App: React.FC = () => {
     })
   }
 
+  const updateManualUploadForScene = (sceneIndex: number, file: File | undefined) => {
+    setManualUploads(prev => ({ ...prev, [sceneIndex]: file }))
+    clearScenePreviews()
+  }
+
   const resetToNewVideo = () => {
     stopManualSceneAudioPreview()
     setResult(null)
@@ -701,24 +706,33 @@ export const App: React.FC = () => {
   }
 
   const handlePreviewScene = async (sceneIndex: number) => {
-    if (!result || !editedScenes.length) return
+    if (!editedScenes.length) return
     const timelineScript = editedScenes
       .map(s => s.text.trim())
       .filter(Boolean)
       .join('\n\n')
-    if (!timelineScript.trim()) {
-      setError('Add scene text before previewing.')
-      return
-    }
     setError(null)
     setScenePreviewLoadingIndex(sceneIndex)
     try {
+      const preRenderManualPreview = creationMode === 'manual' && !result
+      const narrationSource = preRenderManualPreview
+        ? manualNarrationSource
+        : persistedManualNarration
+          ? ('upload' as const)
+          : ('tts' as const)
       const payload = {
         topic,
         scene_index: sceneIndex,
         style,
         script_text: timelineScript.trim().length ? timelineScript : 'Preview',
-        scenes: scenesForApiPayload(editedScenes),
+        scenes: preRenderManualPreview
+          ? sanitizeScenesForPayload(
+              editedScenes.map(s => ({
+                ...s,
+                image_mode: manualImageModes[s.index] ?? (manualUploads[s.index] ? 'upload' : 'placeholder'),
+              })),
+            )
+          : scenesForApiPayload(editedScenes),
         visual_style: visualStyle,
         aspect_ratio: aspectRatio,
         image_fit_mode: imageFitMode,
@@ -727,12 +741,24 @@ export const App: React.FC = () => {
         motion_effect: motionEffect,
         motion_intensity: motionIntensity,
         subtitle_style: subtitleStyle,
-        narration_source: persistedManualNarration ? ('upload' as const) : ('tts' as const),
-        narration_audio_path: persistedManualNarration?.path,
+        narration_source: narrationSource,
+        narration_audio_path: preRenderManualPreview ? undefined : persistedManualNarration?.path,
       }
       const rep = replacementUploads[sceneIndex]
+      const manualUpload = preRenderManualPreview ? manualUploads[sceneIndex] : undefined
       let res: Response
-      if (rep) {
+      if (preRenderManualPreview) {
+        stopManualSceneAudioPreview()
+        const fd = new FormData()
+        fd.append('payload', JSON.stringify(payload))
+        if (manualNarrationSource === 'upload' && manualAudioUpload) {
+          fd.append('audio_upload', manualAudioUpload)
+        }
+        if (manualUpload) {
+          fd.append('preview_image', manualUpload)
+        }
+        res = await fetch(`${API_BASE_URL}/preview-scene`, { method: 'POST', body: fd })
+      } else if (rep) {
         const fd = new FormData()
         fd.append('payload', JSON.stringify(payload))
         fd.append('preview_image', rep)
@@ -793,10 +819,12 @@ export const App: React.FC = () => {
 
   const updateScene = (sceneIndex: number, patch: Partial<Scene>) => {
     setEditedScenes(prev => prev.map(sc => (sc.index === sceneIndex ? { ...sc, ...patch } : sc)))
+    clearScenePreviews()
   }
 
   const addManualScene = () => {
     stopManualSceneAudioPreview()
+    clearScenePreviews()
     const base = reindexScenes(editedScenes)
     setEditedScenes([
       ...base,
@@ -812,6 +840,7 @@ export const App: React.FC = () => {
 
   const removeManualScene = (sceneIndex: number) => {
     stopManualSceneAudioPreview()
+    clearScenePreviews()
     if (editedScenes.length <= 1) return
     const filteredOld = editedScenes.filter(s => s.index !== sceneIndex)
     const reindexed = reindexScenes(filteredOld)
@@ -830,6 +859,7 @@ export const App: React.FC = () => {
 
   const duplicateManualScene = (sceneIndex: number) => {
     stopManualSceneAudioPreview()
+    clearScenePreviews()
     const idx = editedScenes.findIndex(s => s.index === sceneIndex)
     if (idx < 0) return
     const source = editedScenes[idx]
@@ -1135,6 +1165,7 @@ export const App: React.FC = () => {
       setUploadedAudioDuration(0)
       setUploadedAudioCurrentTime(0)
       setSceneCutTimes([])
+      clearScenePreviews()
       return undefined
     }
 
@@ -1143,6 +1174,7 @@ export const App: React.FC = () => {
     setSceneCutTimes([])
     setUploadedAudioDuration(0)
     setUploadedAudioCurrentTime(0)
+    clearScenePreviews()
 
     return () => {
       stopManualSceneAudioPreview()
@@ -1213,6 +1245,7 @@ export const App: React.FC = () => {
 
   const applySceneCutsToScenes = () => {
     stopManualSceneAudioPreview()
+    clearScenePreviews()
     const el = audioRef.current
     const fromEl = el?.duration
     const total =
@@ -1828,12 +1861,14 @@ export const App: React.FC = () => {
                         <select
                           className="select input-full"
                           value={manualImageModes[scene.index] ?? (manualUploads[scene.index] ? 'upload' : 'placeholder')}
-                          onChange={e =>
+                          onChange={e => {
+                            const nextMode = e.target.value as ManualImageMode
                             setManualImageModes(prev => ({
                               ...prev,
-                              [scene.index]: e.target.value as ManualImageMode,
+                              [scene.index]: nextMode,
                             }))
-                          }
+                            clearScenePreviews()
+                          }}
                         >
                           <option value="upload">Upload image</option>
                           <option value="generate">Generate AI image</option>
@@ -1849,7 +1884,7 @@ export const App: React.FC = () => {
                               accept="image/*"
                               onChange={e => {
                                 const f = e.target.files?.[0]
-                                setManualUploads(prev => ({ ...prev, [scene.index]: f }))
+                                updateManualUploadForScene(scene.index, f)
                               }}
                             />
                           </>
@@ -1872,6 +1907,27 @@ export const App: React.FC = () => {
                             />
                           </div>
                         ) : null}
+                        <div style={{ marginTop: '0.5rem' }}>
+                          <button
+                            type="button"
+                            className="tiny-button"
+                            onClick={() => void handlePreviewScene(scene.index)}
+                            disabled={loading || scenePreviewLoadingIndex === scene.index}
+                          >
+                            {scenePreviewLoadingIndex === scene.index ? 'Rendering preview…' : 'Preview scene'}
+                          </button>
+                          {scenePreviewUrlByIndex[scene.index] ? (
+                            <div style={{ marginTop: '0.45rem' }}>
+                              <div className="field-label">Scene preview</div>
+                              <video
+                                key={`manual-scpv-${scene.index}-${scenePreviewNonce}`}
+                                controls
+                                style={{ width: '100%', maxHeight: 220, marginTop: '0.25rem', borderRadius: 6 }}
+                                src={`${API_BASE_URL}${scenePreviewUrlByIndex[scene.index]}?pv=${scenePreviewNonce}`}
+                              />
+                            </div>
+                          ) : null}
+                        </div>
                       </div>
                     ))}
                   </div>

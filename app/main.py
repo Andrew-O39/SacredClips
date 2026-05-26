@@ -207,8 +207,8 @@ def _media_url_to_local_path(url: str | None) -> Path | None:
     return None
 
 
-async def _parse_preview_scene_request(request: Request) -> tuple[PreviewSceneRequest, Any]:
-    """JSON body, or multipart with form field `payload` (JSON string) and optional `preview_image` file."""
+async def _parse_preview_scene_request(request: Request) -> tuple[PreviewSceneRequest, Any, Any]:
+    """JSON body, or multipart with `payload` plus optional `preview_image` and `audio_upload` files."""
     ct = (request.headers.get("content-type") or "").lower()
     if "multipart/form-data" in ct:
         form = await request.form()
@@ -226,8 +226,10 @@ async def _parse_preview_scene_request(request: Request) -> tuple[PreviewSceneRe
                 detail=exc.errors(),
             ) from exc
         up = form.get("preview_image")
-        upload = up if up is not None and hasattr(up, "read") else None
-        return data, upload
+        image_upload = up if up is not None and hasattr(up, "read") else None
+        audio_up = form.get("audio_upload")
+        audio_upload = audio_up if audio_up is not None and hasattr(audio_up, "read") else None
+        return data, image_upload, audio_upload
     try:
         body = await request.json()
     except Exception as exc:
@@ -242,7 +244,7 @@ async def _parse_preview_scene_request(request: Request) -> tuple[PreviewSceneRe
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=exc.errors(),
         ) from exc
-    return data, None
+    return data, None, None
 
 
 def _path_to_media_url(abs_img: Path) -> str:
@@ -530,10 +532,10 @@ async def preview_scene(request: Request):
     """
     Render a single-scene MP4 for quick preview: image + motion + subtitles + narration slice + optional music.
 
-    JSON body (`PreviewSceneRequest`), or multipart with form field `payload` (JSON string) and optional
-    `preview_image` file to override the scene image for this preview only.
+    JSON body (`PreviewSceneRequest`), or multipart with form field `payload` (JSON string), optional
+    `preview_image`, and optional `audio_upload` for manual pre-render previews.
     """
-    data, upload = await _parse_preview_scene_request(request)
+    data, upload, audio_upload = await _parse_preview_scene_request(request)
     topic_dir, audio_dir, images_dir, videos_dir = _prepare_topic_dirs(data.topic)
     previews_dir = topic_dir / "previews"
     previews_dir.mkdir(parents=True, exist_ok=True)
@@ -584,6 +586,20 @@ async def preview_scene(request: Request):
         if url_path:
             img_path_res = url_path
 
+    if img_path_res is None and selected.image_mode == "generate":
+        generated = image_service.generate_images_for_keywords(
+            topic=data.topic,
+            per_scene_keywords=[list(selected.keywords or ["scene"])],
+            output_dir=str(previews_dir / f"scene_{data.scene_index}_generated_image"),
+            visual_style=str(data.visual_style),
+            aspect_ratio=str(data.aspect_ratio),
+            scene_texts=[selected.text],
+        )
+        if generated:
+            gen_path = Path(generated[0]).resolve()
+            if gen_path.is_file() and gen_path.stat().st_size > 0:
+                img_path_res = gen_path
+
     if img_path_res is None:
         ph = previews_dir / f"_preview_placeholder_scene_{data.scene_index}.png"
         image_service.write_placeholder_scene_image(
@@ -599,8 +615,27 @@ async def preview_scene(request: Request):
 
     narr_path_obj: Path | None = None
     src_mode = (data.narration_source or "").strip().lower()
-    if src_mode == "upload" and data.narration_audio_path:
-        narr_path_obj = _safe_resolved_file_under_dir(audio_dir, data.narration_audio_path)
+    if src_mode == "upload":
+        if audio_upload is not None:
+            filename = getattr(audio_upload, "filename", None) or "preview_audio.mp3"
+            suffix = Path(str(filename)).suffix.lower()
+            if suffix not in {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".webm"}:
+                suffix = ".mp3"
+            audio_dest = previews_dir / f"scene_{data.scene_index}_preview_audio{suffix}"
+            try:
+                raw_audio = await audio_upload.read()
+            except Exception as read_exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Could not read audio_upload: {read_exc}",
+                ) from read_exc
+            if raw_audio:
+                audio_dest.write_bytes(raw_audio)
+                if audio_dest.exists() and audio_dest.stat().st_size > 0:
+                    narr_path_obj = audio_dest.resolve()
+
+        if narr_path_obj is None and data.narration_audio_path:
+            narr_path_obj = _safe_resolved_file_under_dir(audio_dir, data.narration_audio_path)
     elif src_mode == "tts" or not src_mode:
         vo = (audio_dir / "voiceover.mp3").resolve()
         try:
