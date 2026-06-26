@@ -206,7 +206,79 @@ type RenderSubtitlesVideoResponse = {
   source_video_url?: string | null
 }
 
+type ThemeMode = 'light' | 'dark'
+
+const THEME_STORAGE_KEY = 'sacredclips-theme'
+
+function readStoredTheme(): ThemeMode {
+  try {
+    const stored = localStorage.getItem(THEME_STORAGE_KEY)
+    if (stored === 'light' || stored === 'dark') return stored
+  } catch {
+    /* ignore */
+  }
+  return 'light'
+}
+
+function CollapsibleCard({
+  title,
+  subtitle,
+  defaultOpen = false,
+  children,
+  className = '',
+}: {
+  title: string
+  subtitle?: string
+  defaultOpen?: boolean
+  children: React.ReactNode
+  className?: string
+}) {
+  const [open, setOpen] = useState(defaultOpen)
+  return (
+    <section className={`ui-card collapsible-card ${open ? 'is-open' : 'is-collapsed'} ${className}`}>
+      <button
+        type="button"
+        className="collapsible-card-header"
+        onClick={() => setOpen(v => !v)}
+        aria-expanded={open}
+      >
+        <div>
+          <h2 className="ui-card-title">{title}</h2>
+          {subtitle ? <p className="ui-card-subtitle">{subtitle}</p> : null}
+        </div>
+        <span className="collapsible-chevron" aria-hidden>
+          {open ? '−' : '+'}
+        </span>
+      </button>
+      {open ? <div className="collapsible-card-body">{children}</div> : null}
+    </section>
+  )
+}
+
+function StaticCard({
+  title,
+  subtitle,
+  children,
+  className = '',
+}: {
+  title: string
+  subtitle?: string
+  children: React.ReactNode
+  className?: string
+}) {
+  return (
+    <section className={`ui-card ${className}`}>
+      <div className="ui-card-header-static">
+        <h2 className="ui-card-title">{title}</h2>
+        {subtitle ? <p className="ui-card-subtitle">{subtitle}</p> : null}
+      </div>
+      <div className="ui-card-body">{children}</div>
+    </section>
+  )
+}
+
 export const App: React.FC = () => {
+  const [themeMode, setThemeMode] = useState<ThemeMode>(readStoredTheme)
   const [creationMode, setCreationMode] = useState<CreationMode>('ai')
   const [videoType, setVideoType] = useState<VideoType>('normal')
   const [topic, setTopic] = useState('What is baptism in Christianity?')
@@ -1410,6 +1482,14 @@ export const App: React.FC = () => {
   }
 
   useEffect(() => {
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, themeMode)
+    } catch {
+      /* ignore */
+    }
+  }, [themeMode])
+
+  useEffect(() => {
     fetchYoutubeStatus().catch(() => undefined)
 
     const allowedOrigins = ['http://localhost:8000', 'http://127.0.0.1:8000']
@@ -1644,38 +1724,54 @@ export const App: React.FC = () => {
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-theme={themeMode}>
       <div className="app-container">
-        <div className="workspace-card">
-          <div className="card-header">
-            <div>
-              <div className="badge">Religious video generator</div>
-              <div className="title">
-                <span className="title-accent" />
-                SacredClips
-              </div>
-              <p className="subtitle">
-                Turn a religious or spiritual topic into a short educational explainer video.
-                Neutral, educational, and ready for TikTok, Reels, or Shorts.
-              </p>
+        <header className="app-header">
+          <div className="app-header-brand">
+            <div className="badge">Religious video generator</div>
+            <div className="title">
+              <span className="title-accent" />
+              SacredClips
             </div>
+            <p className="subtitle">
+              Turn a religious or spiritual topic into a short educational explainer video.
+            </p>
           </div>
-
-          <section className="status-panel" aria-live="polite">
-            <div className="status-panel-header">
-              <div>
-                <div className="status-text">
-                  {loading ? 'Generating' : result ? 'Ready' : 'Idle'} · Backend
-                </div>
-                <p className="secondary-text">
-                  We keep things neutral and respectful. Review each clip before posting.
-                </p>
-              </div>
-              <div className="status-dot" />
+          <div className="app-header-actions">
+            <div className="theme-toggle" role="group" aria-label="Theme">
+              <button
+                type="button"
+                className={`theme-toggle-btn${themeMode === 'light' ? ' is-active' : ''}`}
+                onClick={() => setThemeMode('light')}
+                aria-pressed={themeMode === 'light'}
+              >
+                Light
+              </button>
+              <button
+                type="button"
+                className={`theme-toggle-btn${themeMode === 'dark' ? ' is-active' : ''}`}
+                onClick={() => setThemeMode('dark')}
+                aria-pressed={themeMode === 'dark'}
+              >
+                Dark
+              </button>
             </div>
+            <div className="header-status-chip">
+              <span className="status-dot" />
+              {loading ? 'Generating' : result ? 'Ready' : 'Idle'} · Backend
+            </div>
+            {result ? (
+              <button type="button" className="button button-secondary" onClick={resetToNewVideo}>
+                Start new video
+              </button>
+            ) : null}
+          </div>
+        </header>
 
+        {(loading || error) && (
+          <div className="global-status-bar" aria-live="polite">
             {loading && (
-              <div className="editor-section">
+              <section className="status-panel">
                 <div className="generation-progress-label">
                   {generationStage || 'Generating your video...'}
                 </div>
@@ -1688,32 +1784,19 @@ export const App: React.FC = () => {
                     style={{ width: `${Math.max(5, Math.floor(generationProgress))}%` }}
                   />
                 </div>
-                <p className="footer-hint" style={{ marginTop: '0.6rem' }}>
-                  This is an estimated progress indicator. Final rendering may take longer for longer videos.
+                <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
+                  Final rendering may take longer for longer videos.
                 </p>
-              </div>
+              </section>
             )}
+            {error ? <section className="status-panel"><div className="error">{error}</div></section> : null}
+          </div>
+        )}
 
-            {error && <div className="error">{error}</div>}
-
-            {!result && !loading && (
-              <>
-                <div className="pill-row">
-                  <div className="pill">What is baptism in Christianity?</div>
-                  <div className="pill">Basics of baptism</div>
-                  <div className="pill">What is the Trinity?</div>
-                  <div className="pill">What is a Sabbath?</div>
-                </div>
-                <p className="footer-hint">
-                  Tip: ask for short explainers of holidays, practices, symbols, or concepts.
-                  The app will not create political content or tell people what they should believe.
-                </p>
-              </>
-            )}
-          </section>
-
-          <section className="editor-section editor-section--creation">
-          <form className="form" onSubmit={handleFormSubmit}>
+        <form className="dashboard-layout" onSubmit={handleFormSubmit}>
+          <aside className="sidebar-rail">
+            <div className="sidebar-rail-scroll">
+            <StaticCard title="Project setup" subtitle="Mode, topic, and core inputs">
             <div>
               <div className="field-label">Creation mode</div>
               <div className="range-row">
@@ -1845,117 +1928,418 @@ export const App: React.FC = () => {
                       onChange={e => setManualAudioUpload(e.target.files?.[0])}
                     />
                     <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
-                      Uploaded narration will be used as the video audio track (TTS is skipped).
+                      Uploaded narration will be used as the video audio track. Use the timing assistant in the
+                      workspace to split scenes.
                     </p>
-                    {manualAudioUpload && (
-                      <div className="editor-section" style={{ marginTop: '1rem' }}>
-                        <div className="field-label">Audio timing assistant</div>
-                        <p className="footer-hint">
-                          {
-                            'Play your uploaded narration and click "Add scene cut here" whenever you want the image to change.'
-                          }
-                        </p>
-                        <p className="footer-hint">
-                          Scene durations are used as visual timing and will be scaled to the uploaded audio if
-                          needed.
-                        </p>
-                        <div className="result-block result-block--expanded">
-                          {uploadedAudioUrl ? (
-                            <>
-                              <audio
-                                key={uploadedAudioUrl}
-                                ref={audioRef}
-                                src={uploadedAudioUrl}
-                                controls
-                                onPlay={stopManualSceneAudioPreview}
-                                onLoadedMetadata={syncAudioDurationFromElement}
-                                onDurationChange={syncAudioDurationFromElement}
-                                onTimeUpdate={syncAudioCurrentTimeFromElement}
-                                onSeeking={syncAudioCurrentTimeFromElement}
-                                onSeeked={syncAudioCurrentTimeFromElement}
-                                className="timing-assistant-audio"
-                              />
-                              {creationMode === 'manual' &&
-                                manualNarrationSource === 'upload' &&
-                                editedScenes.length > 0 && (
-                                  <audio
-                                    ref={sceneAudioPreviewRef}
-                                    key={`scene-seg-${uploadedAudioUrl}`}
-                                    src={uploadedAudioUrl}
-                                    preload="auto"
-                                    className="scene-audio-preview-hidden"
-                                    onTimeUpdate={onScenePreviewAudioTimeUpdate}
-                                  />
-                                )}
-                            </>
-                          ) : (
-                            <p className="footer-hint" style={{ marginTop: '0.5rem' }}>
-                              Preparing audio preview…
-                            </p>
-                          )}
-                          <div className="action-row" style={{ marginTop: '0.65rem' }}>
-                            <span className="footer-hint" style={{ marginTop: 0 }}>
-                              Current: {formatAudioSeconds(uploadedAudioCurrentTime)}
-                            </span>
-                            <span className="footer-hint" style={{ marginTop: 0 }}>
-                              Duration: {formatAudioSeconds(uploadedAudioDuration)}
-                            </span>
-                          </div>
-                          <div className="action-row">
-                            <button
-                              type="button"
-                              className="button button-secondary"
-                              disabled={loading || !uploadedAudioUrl}
-                              onClick={addSceneCutAtPlayhead}
-                            >
-                              Add scene cut here
-                            </button>
-                            <button
-                              type="button"
-                              className="button button-secondary"
-                              disabled={
-                                loading ||
-                                !uploadedAudioUrl ||
-                                !Number.isFinite(uploadedAudioDuration) ||
-                                uploadedAudioDuration <= 0
-                              }
-                              onClick={applySceneCutsToScenes}
-                            >
-                              Apply cuts to scenes
-                            </button>
-                          </div>
-                          {sceneCutTimes.length > 0 && (
-                            <div style={{ marginTop: '0.75rem' }}>
-                              <div className="field-label">Scene cuts ({sceneCutTimes.length})</div>
-                              <ul className="scene-cut-list">
-                                {sceneCutTimes.map((t, i) => (
-                                  <li key={`${i}-${t}`} className="scene-cut-list-item">
-                                    <span className="footer-hint" style={{ marginTop: 0 }}>
-                                      Cut {i + 1}: {t.toFixed(3)}s
-                                    </span>
-                                    <button
-                                      type="button"
-                                      className="tiny-button"
-                                      disabled={loading}
-                                      onClick={() => removeSceneCutAtIndex(i)}
-                                    >
-                                      Remove
-                                    </button>
-                                  </li>
-                                ))}
-                              </ul>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    )}
                   </div>
                 )}
               </div>
             )}
 
+            {creationMode !== 'existing' && (
+              <div>
+                <div className="field-label">
+                  Desired video length ({durationMin}s–{durationMax}s)
+                </div>
+                <div className="range-row">
+                  <div className="range-input">
+                    <input
+                      type="range"
+                      min={durationMin}
+                      max={durationMax}
+                      step={durationStep}
+                      value={duration}
+                      onChange={e => setDuration(Number(e.target.value))}
+                      style={{ width: '100%' }}
+                    />
+                  </div>
+                  <div className="range-value">{duration}s</div>
+                </div>
+              </div>
+            )}
+            </StaticCard>
+
+            {creationMode !== 'existing' && (
+            <CollapsibleCard title="Visual settings" subtitle="Style, format, and image fit" defaultOpen>
+              <div>
+                <div className="field-label">Visual style {creationMode === 'ai' ? '(AI images)' : '(placeholders)'}</div>
+                <select
+                  className="select input-full"
+                  value={visualStyle}
+                  onChange={e => setVisualStyle(e.target.value as VisualStyle)}
+                >
+                  {VISUAL_STYLE_OPTIONS.map(opt => (
+                    <option key={opt} value={opt}>
+                      {opt}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <div className="field-label">Content format</div>
+                <select
+                  className="select input-full"
+                  value={videoType}
+                  onChange={e => handleVideoTypeChange(e.target.value as VideoType)}
+                >
+                  <option value="normal">Normal YouTube video (16:9 horizontal)</option>
+                  <option value="shorts">Shorts / TikTok / Reels (9:16 vertical)</option>
+                </select>
+                <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
+                  {videoType === 'normal' ? 'Output format: 16:9 horizontal' : 'Output format: 9:16 vertical'}
+                </p>
+              </div>
+              <div>
+                <div className="field-label">Image fit</div>
+                <select
+                  className="select input-full"
+                  value={imageFitMode}
+                  onChange={e => setImageFitMode(e.target.value as ImageFitMode)}
+                >
+                  <option value="fit">Fit full image</option>
+                  <option value="fill">Fill screen / crop</option>
+                </select>
+                <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
+                  Fit keeps the whole image visible; fill crops to cover the frame.
+                </p>
+              </div>
+            </CollapsibleCard>
+            )}
+
+            {creationMode !== 'existing' && (
+            <CollapsibleCard title="Audio & music" subtitle="Optional background track" defaultOpen={false}>
+              <div>
+                <div className="field-label">Background music</div>
+                <select
+                  className="select input-full"
+                  value={backgroundMusic}
+                  onChange={e => setBackgroundMusic(e.target.value as BackgroundMusic)}
+                >
+                  <option value="none">None</option>
+                  <option value="peaceful_piano">Peaceful piano</option>
+                  <option value="ambient_pad">Ambient pad</option>
+                  <option value="soft_strings">Soft strings</option>
+                  <option value="gentle_choir">Gentle choir</option>
+                </select>
+                {backgroundMusic !== 'none' && (
+                  <>
+                    <div className="field-label" style={{ marginTop: '0.75rem' }}>
+                      Music volume ({Math.round(backgroundMusicVolume * 100)}%)
+                    </div>
+                    <div className="range-row">
+                      <div className="range-input">
+                        <input
+                          type="range"
+                          min={0.02}
+                          max={0.3}
+                          step={0.01}
+                          value={backgroundMusicVolume}
+                          onChange={e => setBackgroundMusicVolume(Number(e.target.value))}
+                          style={{ width: '100%' }}
+                        />
+                      </div>
+                    </div>
+                    <audio
+                      ref={musicPreviewRef}
+                      key={backgroundMusic}
+                      className="music-preview-audio"
+                      controls
+                      src={backgroundMusicPreviewUrl(backgroundMusic) ?? undefined}
+                    />
+                    <p className="footer-hint">Keep volume low so narration remains clear.</p>
+                  </>
+                )}
+              </div>
+            </CollapsibleCard>
+            )}
+
+            {creationMode !== 'existing' && (
+            <CollapsibleCard title="Motion" subtitle="Image movement effects" defaultOpen={false}>
+              <div>
+                <div className="field-label">Motion effect</div>
+                <select
+                  className="select input-full"
+                  value={motionEffect}
+                  onChange={e => setMotionEffect(e.target.value as MotionEffect)}
+                >
+                  <option value="none">None</option>
+                  <option value="gentle_zoom">Gentle zoom</option>
+                  <option value="slow_pan">Slow pan</option>
+                  <option value="ken_burns">Ken Burns</option>
+                </select>
+              </div>
+              <div style={{ opacity: motionEffect === 'none' ? 0.55 : 1 }}>
+                <div className="field-label">Motion intensity</div>
+                <select
+                  className="select input-full"
+                  value={motionIntensity}
+                  disabled={motionEffect === 'none'}
+                  onChange={e => setMotionIntensity(e.target.value as MotionIntensity)}
+                >
+                  <option value="subtle">Subtle</option>
+                  <option value="medium">Medium</option>
+                  <option value="strong">Strong</option>
+                </select>
+              </div>
+            </CollapsibleCard>
+            )}
+
+            <CollapsibleCard title="Captions" subtitle="Subtitle style" defaultOpen>
+              <div>
+                <div className="field-label">Subtitles</div>
+                <select
+                  className="select input-full"
+                  value={subtitleStyle}
+                  onChange={e => {
+                    setSubtitleStyle(e.target.value as SubtitleStyle)
+                    clearExistingVideoResult()
+                  }}
+                >
+                  <option value="off">Off</option>
+                  <option value="minimal">Minimal</option>
+                  <option value="cinematic">Cinematic</option>
+                  <option value="shorts">Shorts style</option>
+                </select>
+                <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
+                  {creationMode === 'existing'
+                    ? 'Manual subtitle segments use the exact start and end times you enter.'
+                    : 'Subtitles are split into readable chunks during each scene.'}
+                </p>
+              </div>
+            </CollapsibleCard>
+
+            <CollapsibleCard title="Branding" subtitle="Logo watermark" defaultOpen={false}>
+              <div className="branding-section">
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={brandingEnabled}
+                    onChange={e => setBrandingEnabled(e.target.checked)}
+                  />
+                  <span>Enable logo watermark</span>
+                </label>
+                {brandingEnabled && (
+                  <>
+                    <div className="branding-upload-row">
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp"
+                        onChange={handleBrandingLogoSelect}
+                        disabled={brandingUploading}
+                      />
+                      {brandingLogoPath && (
+                        <button
+                          type="button"
+                          className="button button-secondary"
+                          onClick={clearBrandingLogo}
+                        >
+                          Remove logo
+                        </button>
+                      )}
+                    </div>
+                    {brandingUploading && <p className="footer-hint">Uploading logo…</p>}
+                    {brandingLogoDisplayUrl && (
+                      <div className="branding-logo-preview-wrap">
+                        <img
+                          src={brandingLogoDisplayUrl}
+                          alt="Logo preview"
+                          className="branding-logo-preview"
+                        />
+                      </div>
+                    )}
+                    <div className="field-label" style={{ marginTop: '0.5rem' }}>Position</div>
+                    <select
+                      className="select input-full"
+                      value={brandingPosition}
+                      onChange={e => setBrandingPosition(e.target.value as BrandingPosition)}
+                    >
+                      <option value="top_left">Top left</option>
+                      <option value="top_right">Top right</option>
+                      <option value="bottom_left">Bottom left</option>
+                      <option value="bottom_right">Bottom right</option>
+                    </select>
+                    <div className="field-label" style={{ marginTop: '0.5rem' }}>Size</div>
+                    <select
+                      className="select input-full"
+                      value={brandingSize}
+                      onChange={e => setBrandingSize(e.target.value as BrandingSize)}
+                    >
+                      <option value="small">Small</option>
+                      <option value="medium">Medium</option>
+                      <option value="large">Large</option>
+                    </select>
+                    <div className="field-label" style={{ marginTop: '0.5rem' }}>
+                      Opacity ({Math.round(brandingOpacity * 100)}%)
+                    </div>
+                    <div className="range-row">
+                      <div className="range-input">
+                        <input
+                          type="range"
+                          min={0.1}
+                          max={1}
+                          step={0.05}
+                          value={brandingOpacity}
+                          onChange={e => setBrandingOpacity(Number(e.target.value))}
+                          style={{ width: '100%' }}
+                        />
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            </CollapsibleCard>
+
+            <CollapsibleCard title="YouTube" subtitle="Connection status" defaultOpen={false}>
+              <p className="youtube-sidebar-summary">
+                {youtubeChecking
+                  ? 'Checking YouTube status…'
+                  : youtubeConnected
+                    ? 'Connected — open the publishing panel in the workspace after rendering.'
+                    : 'Not connected — connect from the publishing panel after rendering.'}
+              </p>
+              <button
+                type="button"
+                className="button button-secondary"
+                onClick={handleConnectYoutube}
+                disabled={youtubeChecking}
+              >
+                {youtubeConnected ? 'Reconnect YouTube' : 'Connect YouTube'}
+              </button>
+            </CollapsibleCard>
+            </div>
+
+            <div className="sidebar-submit-bar">
+              <button className="button" type="submit" disabled={loading}>
+                <span className="button-icon">{loading ? '⏳' : '✨'}</span>
+                {loading
+                  ? creationMode === 'ai'
+                    ? 'Generating sacred clip…'
+                    : creationMode === 'existing'
+                      ? 'Rendering subtitles…'
+                      : 'Building manual clip…'
+                  : creationMode === 'ai'
+                    ? 'Generate video'
+                    : creationMode === 'existing'
+                      ? existingSourceVideoPath
+                        ? 'Re-render subtitles'
+                        : 'Render subtitled video'
+                      : 'Create manual video'}
+              </button>
+            </div>
+          </aside>
+
+          <main className="workspace-main">
+            {!result && !loading && (
+              <section className="workspace-panel idle-tips-panel">
+                <div className="pill-row">
+                  <div className="pill">What is baptism in Christianity?</div>
+                  <div className="pill">Basics of baptism</div>
+                  <div className="pill">What is the Trinity?</div>
+                  <div className="pill">What is a Sabbath?</div>
+                </div>
+                <p className="footer-hint" style={{ marginTop: '0.5rem' }}>
+                  Tip: ask for short explainers of holidays, practices, symbols, or concepts.
+                </p>
+              </section>
+            )}
+
+            {creationMode === 'manual' && manualNarrationSource === 'upload' && manualAudioUpload && !result && (
+              <CollapsibleCard title="Timing assistant" subtitle="Split uploaded narration into scenes" defaultOpen={false}>
+                <p className="footer-hint">
+                  Play your narration and click &quot;Add scene cut here&quot; when the image should change.
+                </p>
+                <div className="result-block result-block--expanded">
+                  {uploadedAudioUrl ? (
+                    <>
+                      <audio
+                        key={uploadedAudioUrl}
+                        ref={audioRef}
+                        src={uploadedAudioUrl}
+                        controls
+                        onPlay={stopManualSceneAudioPreview}
+                        onLoadedMetadata={syncAudioDurationFromElement}
+                        onDurationChange={syncAudioDurationFromElement}
+                        onTimeUpdate={syncAudioCurrentTimeFromElement}
+                        onSeeking={syncAudioCurrentTimeFromElement}
+                        onSeeked={syncAudioCurrentTimeFromElement}
+                        className="timing-assistant-audio"
+                      />
+                      {editedScenes.length > 0 && (
+                        <audio
+                          ref={sceneAudioPreviewRef}
+                          key={`scene-seg-${uploadedAudioUrl}`}
+                          src={uploadedAudioUrl}
+                          preload="auto"
+                          className="scene-audio-preview-hidden"
+                          onTimeUpdate={onScenePreviewAudioTimeUpdate}
+                        />
+                      )}
+                    </>
+                  ) : (
+                    <p className="footer-hint">Preparing audio preview…</p>
+                  )}
+                  <div className="action-row">
+                    <span className="footer-hint" style={{ marginTop: 0 }}>
+                      Current: {formatAudioSeconds(uploadedAudioCurrentTime)}
+                    </span>
+                    <span className="footer-hint" style={{ marginTop: 0 }}>
+                      Duration: {formatAudioSeconds(uploadedAudioDuration)}
+                    </span>
+                  </div>
+                  <div className="action-row">
+                    <button
+                      type="button"
+                      className="button button-secondary"
+                      disabled={loading || !uploadedAudioUrl}
+                      onClick={addSceneCutAtPlayhead}
+                    >
+                      Add scene cut here
+                    </button>
+                    <button
+                      type="button"
+                      className="button button-secondary"
+                      disabled={
+                        loading ||
+                        !uploadedAudioUrl ||
+                        !Number.isFinite(uploadedAudioDuration) ||
+                        uploadedAudioDuration <= 0
+                      }
+                      onClick={applySceneCutsToScenes}
+                    >
+                      Apply cuts to scenes
+                    </button>
+                  </div>
+                  {sceneCutTimes.length > 0 && (
+                    <div style={{ marginTop: '0.5rem' }}>
+                      <div className="field-label">Scene cuts ({sceneCutTimes.length})</div>
+                      <ul className="scene-cut-list">
+                        {sceneCutTimes.map((t, i) => (
+                          <li key={`${i}-${t}`} className="scene-cut-list-item">
+                            <span className="footer-hint" style={{ marginTop: 0 }}>
+                              Cut {i + 1}: {t.toFixed(3)}s
+                            </span>
+                            <button
+                              type="button"
+                              className="tiny-button"
+                              disabled={loading}
+                              onClick={() => removeSceneCutAtIndex(i)}
+                            >
+                              Remove
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              </CollapsibleCard>
+            )}
+
             {creationMode === 'existing' && (
-              <div className="editor-section">
+              <section className="workspace-panel">
+                <div className="workspace-panel-header">
+                  <h2 className="workspace-panel-title">Existing video editor</h2>
+                </div>
                 <div>
                   <div className="field-label">Existing video</div>
                   <input
@@ -1964,18 +2348,17 @@ export const App: React.FC = () => {
                     onChange={e => handleExistingVideoFileChange(e.target.files?.[0])}
                   />
                   <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
-                    Upload an MP4, MOV, MKV, or WebM. SacredClips will preserve the visuals and burn subtitles onto it.
+                    Upload MP4, MOV, MKV, or WebM. SacredClips burns subtitles onto your video.
                   </p>
                   {existingSourceVideoPath && !uploadedVideoFile ? (
                     <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
-                      Reusing uploaded source video from the previous render. You can re-render subtitles without
-                      uploading it again.
+                      Reusing source from previous render — no re-upload needed.
                     </p>
                   ) : null}
                 </div>
 
                 {existingVideoPreviewSrc ? (
-                  <div>
+                  <div style={{ marginTop: '0.85rem' }}>
                     <div className="field-label">Subtitle style preview</div>
                     <div className="existing-video-preview">
                       <video
@@ -1998,23 +2381,17 @@ export const App: React.FC = () => {
                         </div>
                       )}
                     </div>
-                    <p className="footer-hint">
-                      This is a browser preview only. The final render burns subtitles into the uploaded video.
-                    </p>
                   </div>
                 ) : null}
 
-                <div>
+                <div style={{ marginTop: '1rem' }}>
                   <div className="section-header-row">
                     <div className="field-label">Subtitle segments</div>
                     <button type="button" className="tiny-button" onClick={addExistingSubtitle}>
                       + Add subtitle
                     </button>
                   </div>
-                  <p className="footer-hint" style={{ marginTop: '0.25rem' }}>
-                    Preview a segment to check whether the subtitle appears at the right moment.
-                  </p>
-                  <div className="subtitle-segment-timeline">
+                  <div className="subtitle-segment-timeline" style={{ marginTop: '0.5rem' }}>
                     <div className="subtitle-segment-track">
                     {existingSubtitles.map((item, idx) => (
                       <div key={item.id} className="subtitle-segment-card">
@@ -2090,287 +2467,14 @@ export const App: React.FC = () => {
                     </div>
                   </div>
                 </div>
-              </div>
-            )}
-
-            {creationMode !== 'existing' && (
-            <div>
-              <div className="field-label">Visual style {creationMode === 'ai' ? '(AI images)' : '(placeholders)'}</div>
-              <select
-                className="select input-full"
-                value={visualStyle}
-                onChange={e => setVisualStyle(e.target.value as VisualStyle)}
-              >
-                {VISUAL_STYLE_OPTIONS.map(opt => (
-                  <option key={opt} value={opt}>
-                    {opt}
-                  </option>
-                ))}
-              </select>
-            </div>
-            )}
-
-            {creationMode !== 'existing' && (
-            <div>
-              <div className="field-label">Content format</div>
-              <select
-                className="select input-full"
-                value={videoType}
-                onChange={e => handleVideoTypeChange(e.target.value as VideoType)}
-              >
-                <option value="normal">Normal YouTube video (16:9 horizontal)</option>
-                <option value="shorts">Shorts / TikTok / Reels (9:16 vertical)</option>
-              </select>
-              <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
-                {videoType === 'normal'
-                  ? 'Output format: 16:9 horizontal'
-                  : 'Output format: 9:16 vertical'}
-              </p>
-            </div>
-            )}
-
-            {creationMode !== 'existing' && (
-            <div>
-              <div className="field-label">Image fit</div>
-              <select
-                className="select input-full"
-                value={imageFitMode}
-                onChange={e => setImageFitMode(e.target.value as ImageFitMode)}
-              >
-                <option value="fit">Fit full image</option>
-                <option value="fill">Fill screen / crop</option>
-              </select>
-              <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
-                Fit full image: keeps the whole image visible, may add padding.
-              </p>
-              <p className="footer-hint" style={{ marginTop: '0.2rem' }}>
-                Fill screen / crop: fills the frame, may crop image edges.
-              </p>
-            </div>
-            )}
-
-            {creationMode !== 'existing' && (
-            <div>
-              <div className="field-label">Background music</div>
-              <select
-                className="select input-full"
-                value={backgroundMusic}
-                onChange={e => setBackgroundMusic(e.target.value as BackgroundMusic)}
-              >
-                <option value="none">None</option>
-                <option value="peaceful_piano">Peaceful piano</option>
-                <option value="ambient_pad">Ambient pad</option>
-                <option value="soft_strings">Soft strings</option>
-                <option value="gentle_choir">Gentle choir</option>
-              </select>
-              {backgroundMusic !== 'none' && (
-                <>
-                  <div className="field-label" style={{ marginTop: '0.75rem' }}>
-                    Music volume ({Math.round(backgroundMusicVolume * 100)}%)
-                  </div>
-                  <div className="range-row">
-                    <div className="range-input">
-                      <input
-                        type="range"
-                        min={0.02}
-                        max={0.3}
-                        step={0.01}
-                        value={backgroundMusicVolume}
-                        onChange={e => setBackgroundMusicVolume(Number(e.target.value))}
-                        style={{ width: '100%' }}
-                      />
-                    </div>
-                  </div>
-                  <p className="footer-hint">Keep volume low so narration remains clear.</p>
-                  <audio
-                    ref={musicPreviewRef}
-                    key={backgroundMusic}
-                    className="music-preview-audio"
-                    controls
-                    src={backgroundMusicPreviewUrl(backgroundMusic) ?? undefined}
-                  />
-                  <p className="footer-hint">
-                    Preview uses the selected volume. Final video will mix music under narration.
-                  </p>
-                </>
-              )}
-            </div>
-            )}
-
-            {creationMode !== 'existing' && (
-            <div>
-              <div className="field-label">Motion effect</div>
-              <select
-                className="select input-full"
-                value={motionEffect}
-                onChange={e => setMotionEffect(e.target.value as MotionEffect)}
-              >
-                <option value="none">None</option>
-                <option value="gentle_zoom">Gentle zoom</option>
-                <option value="slow_pan">Slow pan</option>
-                <option value="ken_burns">Ken Burns</option>
-              </select>
-              <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
-                Adds subtle motion to still images. Ken Burns gently zooms and pans across the image.
-              </p>
-            </div>
-            )}
-
-            {creationMode !== 'existing' && (
-            <div style={{ opacity: motionEffect === 'none' ? 0.55 : 1 }}>
-              <div className="field-label">Motion intensity</div>
-              <select
-                className="select input-full"
-                value={motionIntensity}
-                disabled={motionEffect === 'none'}
-                onChange={e => setMotionIntensity(e.target.value as MotionIntensity)}
-              >
-                <option value="subtle">Subtle</option>
-                <option value="medium">Medium</option>
-                <option value="strong">Strong</option>
-              </select>
-              <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
-                Controls how noticeable the image movement feels.
-              </p>
-            </div>
-            )}
-
-            <div>
-              <div className="field-label">Subtitles</div>
-              <select
-                className="select input-full"
-                value={subtitleStyle}
-                onChange={e => {
-                  setSubtitleStyle(e.target.value as SubtitleStyle)
-                  clearExistingVideoResult()
-                }}
-              >
-                <option value="off">Off</option>
-                <option value="minimal">Minimal</option>
-                <option value="cinematic">Cinematic</option>
-                <option value="shorts">Shorts style</option>
-              </select>
-              <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
-                {creationMode === 'existing'
-                  ? 'Manual subtitle segments use the exact start and end times you enter.'
-                  : 'Subtitles are split into readable chunks during each scene. Shorts and vertical (9:16) use shorter lines and up to three lines when needed. For best timing with uploaded narration, use shorter scene text or create more scene cuts where the spoken lines change.'}
-              </p>
-            </div>
-
-            <div className="branding-section">
-              <div className="field-label">Branding / logo</div>
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={brandingEnabled}
-                  onChange={e => setBrandingEnabled(e.target.checked)}
-                />
-                <span>Enable logo watermark</span>
-              </label>
-              {brandingEnabled && (
-                <>
-                  <div className="branding-upload-row">
-                    <input
-                      type="file"
-                      accept="image/png,image/jpeg,image/webp"
-                      onChange={handleBrandingLogoSelect}
-                      disabled={brandingUploading}
-                    />
-                    {brandingLogoPath && (
-                      <button
-                        type="button"
-                        className="button button-secondary"
-                        onClick={clearBrandingLogo}
-                      >
-                        Remove logo
-                      </button>
-                    )}
-                  </div>
-                  {brandingUploading && (
-                    <p className="footer-hint">Uploading logo…</p>
-                  )}
-                  {brandingLogoDisplayUrl && (
-                    <div className="branding-logo-preview-wrap">
-                      <img
-                        src={brandingLogoDisplayUrl}
-                        alt="Logo preview"
-                        className="branding-logo-preview"
-                      />
-                    </div>
-                  )}
-                  <div className="field-label" style={{ marginTop: '0.75rem' }}>
-                    Position
-                  </div>
-                  <select
-                    className="select input-full"
-                    value={brandingPosition}
-                    onChange={e => setBrandingPosition(e.target.value as BrandingPosition)}
-                  >
-                    <option value="top_left">Top left</option>
-                    <option value="top_right">Top right</option>
-                    <option value="bottom_left">Bottom left</option>
-                    <option value="bottom_right">Bottom right</option>
-                  </select>
-                  <div className="field-label" style={{ marginTop: '0.75rem' }}>
-                    Size
-                  </div>
-                  <select
-                    className="select input-full"
-                    value={brandingSize}
-                    onChange={e => setBrandingSize(e.target.value as BrandingSize)}
-                  >
-                    <option value="small">Small</option>
-                    <option value="medium">Medium</option>
-                    <option value="large">Large</option>
-                  </select>
-                  <div className="field-label" style={{ marginTop: '0.75rem' }}>
-                    Opacity ({Math.round(brandingOpacity * 100)}%)
-                  </div>
-                  <div className="range-row">
-                    <div className="range-input">
-                      <input
-                        type="range"
-                        min={0.1}
-                        max={1}
-                        step={0.05}
-                        value={brandingOpacity}
-                        onChange={e => setBrandingOpacity(Number(e.target.value))}
-                        style={{ width: '100%' }}
-                      />
-                    </div>
-                  </div>
-                  <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
-                    Upload once; the logo path is reused for AI, manual, and existing-video renders.
-                  </p>
-                </>
-              )}
-            </div>
-
-            {creationMode !== 'existing' && (
-            <div>
-              <div className="field-label">
-                Desired video length ({durationMin}s–{durationMax}s)
-              </div>
-              <div className="range-row">
-                <div className="range-input">
-                  <input
-                    type="range"
-                    min={durationMin}
-                    max={durationMax}
-                    step={durationStep}
-                    value={duration}
-                    onChange={e => setDuration(Number(e.target.value))}
-                    style={{ width: '100%' }}
-                  />
-                </div>
-                <div className="range-value">{duration}s</div>
-              </div>
-            </div>
+              </section>
             )}
 
             {editedScenes.length > 0 && creationMode === 'manual' && !result && (
-              <div>
-                <div className="field-label">Scenes (before render)</div>
+              <section className="workspace-panel">
+                <div className="workspace-panel-header">
+                  <h2 className="workspace-panel-title">Scene timeline (before render)</h2>
+                </div>
                 <div className="scene-timeline">
                   <div className="scene-timeline-track">
                     {editedScenes.map(scene => (
@@ -2528,7 +2632,7 @@ export const App: React.FC = () => {
                               <video
                                 key={`manual-scpv-${scene.index}-${scenePreviewNonce}`}
                                 controls
-                                style={{ width: '100%', maxHeight: 220, marginTop: '0.25rem', borderRadius: 6 }}
+                                className="scene-preview-video"
                                 src={`${API_BASE_URL}${scenePreviewUrlByIndex[scene.index]}?pv=${scenePreviewNonce}`}
                               />
                             </div>
@@ -2538,35 +2642,17 @@ export const App: React.FC = () => {
                     ))}
                   </div>
                 </div>
-              </div>
+              </section>
             )}
-
-            <button className="button" type="submit" disabled={loading}>
-              <span className="button-icon">{loading ? '⏳' : '✨'}</span>
-              {loading
-                ? creationMode === 'ai'
-                  ? 'Generating sacred clip…'
-                  : creationMode === 'existing'
-                    ? 'Rendering subtitles…'
-                    : 'Building manual clip…'
-                : creationMode === 'ai'
-                  ? 'Generate video'
-                  : creationMode === 'existing'
-                    ? existingSourceVideoPath
-                      ? 'Re-render subtitles'
-                      : 'Render subtitled video'
-                    : 'Create manual video'}
-            </button>
-          </form>
-          </section>
 
           {result && (
             <>
-              <section className="editor-section">
+              <section className="workspace-panel preview-card">
                 <div
                   className={`alert ${
                     result.used_ai ? 'alert-success' : 'alert-warning'
                   }`}
+                  style={{ marginBottom: '0.85rem' }}
                 >
                   {creationMode === 'existing' ? (
                     <>
@@ -2589,11 +2675,10 @@ export const App: React.FC = () => {
                     </>
                   )}
                 </div>
-              </section>
-
-              <section className="editor-section editor-section--preview">
-                <div className="small-label">Preview</div>
-                <div className="video-wrapper">
+                <div className="workspace-panel-header">
+                  <h2 className="workspace-panel-title">Video preview</h2>
+                </div>
+                <div className={`video-wrapper${videoType === 'shorts' || aspectRatio === '9:16' ? ' video-wrapper--vertical' : ''}`}>
                   <video
                     key={videoVersion}
                     controls
@@ -2614,15 +2699,14 @@ export const App: React.FC = () => {
                   </button>
                 </div>
                 <p className="footer-hint">
-                  Video is rendered on your backend and served from <code>{result.video_url}</code>. You can download it
-                  as an MP4 and upload to TikTok, Instagram, or YouTube.
+                  Served from <code>{result.video_url}</code> — download and upload to your platform.
                 </p>
               </section>
 
               {creationMode !== 'existing' && (
-              <section className="editor-section">
+              <section className="workspace-panel">
                 <div className="section-header-row">
-                  <div className="small-label">Script</div>
+                  <h2 className="workspace-panel-title">Script</h2>
                   <div className="action-row">
                     <button
                       type="button"
@@ -2670,15 +2754,15 @@ export const App: React.FC = () => {
               )}
 
               {creationMode !== 'existing' && (
-              <section className="editor-section">
-                <div className="section-header-row">
-                  <div className="small-label">Scene editor</div>
+              <section className="workspace-panel">
+                <div className="workspace-panel-header">
+                  <h2 className="workspace-panel-title">Scene editor</h2>
                 </div>
                 <p className="footer-hint" style={{ marginBottom: '0.35rem' }}>
                   Total timeline duration: {totalSceneDuration.toFixed(1)}s · Target: {duration.toFixed(1)}s
                 </p>
                 {hasDurationWarning && (
-                  <p className="footer-hint" style={{ color: '#b45309', marginBottom: '0.6rem' }}>
+                  <p className="footer-hint footer-hint--warning" style={{ marginBottom: '0.6rem' }}>
                     Timeline differs from target by more than 10s. You can still regenerate.
                   </p>
                 )}
@@ -2837,7 +2921,7 @@ export const App: React.FC = () => {
                               <video
                                 key={`scpv-${scene.index}-${scenePreviewNonce}`}
                                 controls
-                                style={{ width: '100%', maxHeight: 220, marginTop: '0.25rem', borderRadius: 6 }}
+                                className="scene-preview-video"
                                 src={`${API_BASE_URL}${scenePreviewUrlByIndex[scene.index]}?pv=${scenePreviewNonce}`}
                               />
                             </div>
@@ -2860,39 +2944,37 @@ export const App: React.FC = () => {
               </section>
               )}
 
-              <section className="editor-section editor-section--youtube">
-                <div className="section-header-row">
-                  <div className="small-label">YouTube Shorts</div>
-                  <div className="status-text">
+              <CollapsibleCard title="YouTube publishing" subtitle="Upload rendered video to YouTube" defaultOpen={false}>
+                <div className="section-header-row" style={{ marginBottom: '0.5rem' }}>
+                  <span className="status-text">
                     {youtubeChecking
                       ? 'Checking YouTube status...'
                       : youtubeConnected
                         ? 'Connected to YouTube'
                         : 'Not connected'}
-                  </div>
+                  </span>
+                  <button
+                    type="button"
+                    className="tiny-button"
+                    onClick={fetchYoutubeStatus}
+                    disabled={youtubeChecking}
+                  >
+                    Refresh status
+                  </button>
                 </div>
-                <div className="result-block result-block--expanded">
-                  <div className="button-row" style={{ marginBottom: '0.75rem' }}>
-                    <button
-                      type="button"
-                      className="button button-secondary"
-                      onClick={handleConnectYoutube}
-                      disabled={youtubeChecking}
-                    >
-                      <span className="button-icon">📺</span>
-                      {youtubeConnected ? 'Reconnect YouTube' : 'Connect YouTube'}
-                    </button>
-                    <button
-                      type="button"
-                      className="tiny-button"
-                      onClick={fetchYoutubeStatus}
-                      disabled={youtubeChecking}
-                    >
-                      Refresh status
-                    </button>
-                  </div>
+                <div className="button-row" style={{ marginBottom: '0.75rem' }}>
+                  <button
+                    type="button"
+                    className="button button-secondary"
+                    onClick={handleConnectYoutube}
+                    disabled={youtubeChecking}
+                  >
+                    <span className="button-icon">📺</span>
+                    {youtubeConnected ? 'Reconnect YouTube' : 'Connect YouTube'}
+                  </button>
+                </div>
 
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                     <input
                       className="input"
                       placeholder="YouTube title"
@@ -2946,11 +3028,11 @@ export const App: React.FC = () => {
                       </a>
                     </p>
                   )}
-                </div>
-              </section>
+              </CollapsibleCard>
             </>
           )}
-        </div>
+          </main>
+        </form>
       </div>
     </div>
   )
