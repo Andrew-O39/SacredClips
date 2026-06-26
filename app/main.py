@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Any, List, Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile, status
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -12,13 +12,18 @@ from . import config
 from .schemas import (
     AspectRatio,
     BackgroundMusic,
+    BrandingPosition,
+    BrandingSize,
+    BrandingUploadResponse,
     ImageFitMode,
     ManualVideoRequest,
     MotionEffect,
     MotionIntensity,
     PreviewSceneRequest,
     PreviewSceneResponse,
+    RenderSubtitlesVideoResponse,
     Scene,
+    SubtitleItem,
     SubtitleStyle,
     VideoRequest,
     VideoResponse,
@@ -92,6 +97,10 @@ _background_music_adapter = TypeAdapter(BackgroundMusic)
 _motion_effect_adapter = TypeAdapter(MotionEffect)
 _motion_intensity_adapter = TypeAdapter(MotionIntensity)
 _subtitle_style_adapter = TypeAdapter(SubtitleStyle)
+_branding_position_adapter = TypeAdapter(BrandingPosition)
+_branding_size_adapter = TypeAdapter(BrandingSize)
+
+BRANDING_DIR = media_root / "branding"
 
 
 def _normalize_visual_style(value: object) -> VisualStyle:
@@ -170,6 +179,89 @@ def _clamp_background_music_volume(raw: object) -> float:
     except (TypeError, ValueError):
         return 0.12
     return max(0.0, min(0.5, v))
+
+
+def _branding_dir() -> Path:
+    BRANDING_DIR.mkdir(parents=True, exist_ok=True)
+    return BRANDING_DIR.resolve()
+
+
+def _resolve_branding_logo_path(candidate: str | None) -> Path | None:
+    return _safe_resolved_file_under_dir(_branding_dir(), candidate)
+
+
+def _parse_bool_form(raw: object) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _normalize_branding_position(value: object) -> BrandingPosition:
+    try:
+        return _branding_position_adapter.validate_python(value)
+    except ValidationError:
+        return "bottom_right"
+
+
+def _normalize_branding_size(value: object) -> BrandingSize:
+    try:
+        return _branding_size_adapter.validate_python(value)
+    except ValidationError:
+        return "medium"
+
+
+def _clamp_branding_opacity(raw: object) -> float:
+    if raw is None or raw == "":
+        return 0.8
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 0.8
+    return max(0.0, min(1.0, v))
+
+
+def _branding_render_kwargs(
+    enabled: bool,
+    logo_path: str | None,
+    position: BrandingPosition,
+    size: BrandingSize,
+    opacity: float,
+) -> dict:
+    resolved = _resolve_branding_logo_path(logo_path) if enabled and logo_path else None
+    use = bool(enabled and resolved)
+    return {
+        "branding_enabled": use,
+        "branding_logo_path": str(resolved) if use and resolved else None,
+        "branding_position": position,
+        "branding_size": size,
+        "branding_opacity": _clamp_branding_opacity(opacity),
+    }
+
+
+def _parse_branding_from_form(form) -> dict:
+    path_raw = form.get("branding_logo_path")
+    path = path_raw.strip() if isinstance(path_raw, str) and path_raw.strip() else None
+    return _branding_render_kwargs(
+        _parse_bool_form(form.get("branding_enabled")),
+        path,
+        _normalize_branding_position(form.get("branding_position")),
+        _normalize_branding_size(form.get("branding_size")),
+        _clamp_branding_opacity(form.get("branding_opacity")),
+    )
+
+
+def _parse_branding_from_dict(body: dict) -> dict:
+    path_raw = body.get("branding_logo_path")
+    path = path_raw if isinstance(path_raw, str) and path_raw.strip() else None
+    return _branding_render_kwargs(
+        bool(body.get("branding_enabled")),
+        path,
+        _normalize_branding_position(body.get("branding_position")),
+        _normalize_branding_size(body.get("branding_size")),
+        _clamp_branding_opacity(body.get("branding_opacity")),
+    )
 
 
 def _sort_scenes(scenes: List[Scene]) -> List[Scene]:
@@ -298,6 +390,11 @@ def _finalize_video_response(
     subtitle_style: SubtitleStyle = "off",
     narration_source: Optional[Literal["tts", "upload"]] = None,
     narration_audio_path: Optional[str] = None,
+    branding_enabled: bool = False,
+    branding_logo_path: Optional[str] = None,
+    branding_position: BrandingPosition = "bottom_right",
+    branding_size: BrandingSize = "medium",
+    branding_opacity: float = 0.8,
 ) -> VideoResponse:
     scene_durations = [s.duration_seconds for s in scenes_ordered]
     subtitle_texts = [s.text for s in scenes_ordered]
@@ -318,6 +415,11 @@ def _finalize_video_response(
         motion_intensity=motion_intensity,
         subtitle_style=subtitle_style,
         subtitle_texts=subtitle_texts,
+        branding_enabled=branding_enabled,
+        branding_logo_path=branding_logo_path,
+        branding_position=str(branding_position),
+        branding_size=str(branding_size),
+        branding_opacity=branding_opacity,
     )
     abs_video_path = Path(video_path).resolve()
     rel_to_media = abs_video_path.relative_to(media_root)
@@ -441,6 +543,13 @@ def _regenerate_from_manual_request(req: ManualVideoRequest) -> VideoResponse:
         subtitle_style=req.subtitle_style,
         narration_source=narr_source,
         narration_audio_path=narr_path_out,
+        **_branding_render_kwargs(
+            req.branding_enabled,
+            req.branding_logo_path,
+            req.branding_position,
+            req.branding_size,
+            req.branding_opacity,
+        ),
     )
 
 
@@ -486,6 +595,14 @@ def generate_video(req: VideoRequest):
         filename="voiceover.mp3",
     )
 
+    branding = _branding_render_kwargs(
+        req.branding_enabled,
+        req.branding_logo_path,
+        req.branding_position,
+        req.branding_size,
+        req.branding_opacity,
+    )
+
     return _finalize_video_response(
         topic=req.topic,
         script_text=script_text,
@@ -503,6 +620,7 @@ def generate_video(req: VideoRequest):
         subtitle_style=req.subtitle_style,
         narration_source="tts",
         narration_audio_path=None,
+        **branding,
     )
 
 
@@ -666,6 +784,136 @@ async def preview_scene(request: Request):
     return PreviewSceneResponse(
         preview_video_path=str(abs_out),
         preview_video_url=_path_to_media_url(abs_out),
+    )
+
+
+@app.post("/render-subtitles-video", response_model=RenderSubtitlesVideoResponse)
+async def render_subtitles_video(request: Request):
+    """
+    Burn manually timed subtitles onto an uploaded/existing local video.
+
+    Preferred multipart fields:
+      - topic
+      - subtitle_style
+      - subtitles_json: JSON array of {id, start_seconds, end_seconds, text}
+      - video_upload: mp4/mov/mkv/webm file
+
+    Re-renders may omit `video_upload` and provide a safe `source_video_path` under the topic uploads folder.
+    """
+    ct = (request.headers.get("content-type") or "").lower()
+    topic: str
+    subtitle_style_raw: object
+    subtitles_raw: object
+    source_video: Path | None = None
+
+    if "multipart/form-data" in ct:
+        form = await request.form()
+        topic_val = form.get("topic")
+        if not isinstance(topic_val, str) or not topic_val.strip():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="topic is required")
+        topic = topic_val.strip()
+        topic_dir, _, _, _ = _prepare_topic_dirs(topic)
+        uploads_dir = topic_dir / "uploads"
+        rendered_dir = topic_dir / "rendered"
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+        rendered_dir.mkdir(parents=True, exist_ok=True)
+
+        subtitle_style_raw = form.get("subtitle_style") or "minimal"
+        subtitles_raw = form.get("subtitles_json")
+        upload = form.get("video_upload")
+        if upload is not None and hasattr(upload, "read"):
+            filename = getattr(upload, "filename", None) or "uploaded_video.mp4"
+            suffix = Path(str(filename)).suffix.lower()
+            if suffix not in {".mp4", ".mov", ".mkv", ".webm"}:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="video_upload must be .mp4, .mov, .mkv, or .webm",
+                )
+            dest = uploads_dir / f"existing_video_upload{suffix}"
+            try:
+                raw = await upload.read()
+            except Exception as read_exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Could not read video_upload: {read_exc}",
+                ) from read_exc
+            if raw:
+                dest.write_bytes(raw)
+                source_video = dest.resolve()
+        else:
+            path_val = form.get("source_video_path") or form.get("video_path")
+            if isinstance(path_val, str):
+                source_video = _safe_resolved_file_under_dir(uploads_dir, path_val)
+    else:
+        body = await request.json()
+        topic_val = body.get("topic")
+        if not isinstance(topic_val, str) or not topic_val.strip():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="topic is required")
+        topic = topic_val.strip()
+        topic_dir, _, _, _ = _prepare_topic_dirs(topic)
+        uploads_dir = topic_dir / "uploads"
+        rendered_dir = topic_dir / "rendered"
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+        rendered_dir.mkdir(parents=True, exist_ok=True)
+        subtitle_style_raw = body.get("subtitle_style") or "minimal"
+        subtitles_raw = body.get("subtitles") or body.get("subtitles_json")
+        path_val = body.get("source_video_path") or body.get("video_path")
+        source_video = _safe_resolved_file_under_dir(uploads_dir, path_val if isinstance(path_val, str) else None)
+
+    if source_video is None or not source_video.is_file() or source_video.stat().st_size <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A valid uploaded video is required")
+
+    subtitle_style = _normalize_subtitle_style(subtitle_style_raw)
+    if isinstance(subtitles_raw, str):
+        try:
+            subtitle_items = TypeAdapter(List[SubtitleItem]).validate_json(subtitles_raw)
+        except ValidationError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.errors()) from exc
+    else:
+        try:
+            subtitle_items = TypeAdapter(List[SubtitleItem]).validate_python(subtitles_raw or [])
+        except ValidationError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.errors()) from exc
+
+    if subtitle_style != "off" and not subtitle_items:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Add at least one subtitle item, or choose subtitle style 'off'.",
+        )
+
+    branding: dict
+    if "multipart/form-data" in ct:
+        branding = _parse_branding_from_form(form)
+        logo_up = form.get("branding_logo_upload")
+        if logo_up is not None and hasattr(logo_up, "read"):
+            saved_logo = await _save_branding_logo_upload(logo_up)
+            if saved_logo:
+                branding = _branding_render_kwargs(
+                    _parse_bool_form(form.get("branding_enabled")),
+                    str(saved_logo),
+                    _normalize_branding_position(form.get("branding_position")),
+                    _normalize_branding_size(form.get("branding_size")),
+                    _clamp_branding_opacity(form.get("branding_opacity")),
+                )
+    else:
+        branding = _parse_branding_from_dict(body)
+
+    rendered_dir = topic_dir / "rendered"
+    rendered_dir.mkdir(parents=True, exist_ok=True)
+    out_mp4 = rendered_dir / "subtitled_video.mp4"
+    video_service.render_subtitles_on_video(
+        video_path=str(source_video),
+        output_path=str(out_mp4),
+        subtitles=[s.model_dump() for s in subtitle_items],
+        subtitle_style=str(subtitle_style),
+        **branding,
+    )
+    abs_out = out_mp4.resolve()
+    return RenderSubtitlesVideoResponse(
+        video_path=str(abs_out),
+        video_url=_path_to_media_url(abs_out),
+        source_video_path=str(source_video.resolve()),
+        source_video_url=_path_to_media_url(source_video.resolve()),
     )
 
 
@@ -952,6 +1200,19 @@ async def manual_video(request: Request):
         narr_resp_source = "upload"
         narr_resp_path = audio_path
 
+    branding = _parse_branding_from_form(form)
+    logo_up = form.get("branding_logo_upload")
+    if logo_up is not None and hasattr(logo_up, "read"):
+        saved_logo = await _save_branding_logo_upload(logo_up)
+        if saved_logo:
+            branding = _branding_render_kwargs(
+                _parse_bool_form(form.get("branding_enabled")),
+                str(saved_logo),
+                _normalize_branding_position(form.get("branding_position")),
+                _normalize_branding_size(form.get("branding_size")),
+                _clamp_branding_opacity(form.get("branding_opacity")),
+            )
+
     return _finalize_video_response(
         topic=topic,
         script_text=script_text,
@@ -969,6 +1230,48 @@ async def manual_video(request: Request):
         subtitle_style=subtitle_style,
         narration_source=narr_resp_source,
         narration_audio_path=narr_resp_path,
+        **branding,
+    )
+
+
+async def _save_branding_logo_upload(upload) -> Path | None:
+    """Persist a multipart logo file under outputs/branding/current_logo.<ext>."""
+    if upload is None or not hasattr(upload, "read"):
+        return None
+    filename = getattr(upload, "filename", None) or "logo.png"
+    suffix = Path(str(filename)).suffix.lower()
+    if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Logo must be .png, .jpg, .jpeg, or .webp",
+        )
+    try:
+        raw = await upload.read()
+    except Exception as read_exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Could not read logo upload: {read_exc}",
+        ) from read_exc
+    if not raw:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Logo file is empty")
+    dest = _branding_dir() / f"current_logo{suffix}"
+    dest.write_bytes(raw)
+    if not dest.is_file() or dest.stat().st_size <= 0:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to save logo")
+    return dest.resolve()
+
+
+@app.post("/branding/upload", response_model=BrandingUploadResponse)
+async def branding_upload(logo: UploadFile = File(...)):
+    """
+    Upload a channel logo once; returns branding_logo_path for reuse across render modes.
+    """
+    saved = await _save_branding_logo_upload(logo)
+    if not saved:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="logo file is required")
+    return BrandingUploadResponse(
+        branding_logo_path=str(saved),
+        branding_logo_url=_path_to_media_url(saved),
     )
 
 

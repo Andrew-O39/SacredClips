@@ -26,6 +26,10 @@ MotionIntensity = Literal["subtle", "medium", "strong"]
 
 SubtitleStyle = Literal["off", "minimal", "cinematic", "shorts"]
 
+BrandingPosition = Literal["top_left", "top_right", "bottom_left", "bottom_right"]
+
+BrandingSize = Literal["small", "medium", "large"]
+
 SceneImageMode = Literal["upload", "generate", "placeholder"]
 
 
@@ -53,6 +57,11 @@ class VideoRequest(BaseModel):
     motion_effect: MotionEffect = "gentle_zoom"
     motion_intensity: MotionIntensity = "subtle"
     subtitle_style: SubtitleStyle = "off"
+    branding_enabled: bool = False
+    branding_logo_path: Optional[str] = None
+    branding_position: BrandingPosition = "bottom_right"
+    branding_size: BrandingSize = "medium"
+    branding_opacity: float = Field(default=0.8, ge=0.0, le=1.0)
 
 
 class ManualVideoRequest(BaseModel):
@@ -77,11 +86,35 @@ class ManualVideoRequest(BaseModel):
     subtitle_style: SubtitleStyle = "off"
     narration_source: Optional[Literal["tts", "upload"]] = None
     narration_audio_path: Optional[str] = None
+    branding_enabled: bool = False
+    branding_logo_path: Optional[str] = None
+    branding_position: BrandingPosition = "bottom_right"
+    branding_size: BrandingSize = "medium"
+    branding_opacity: float = Field(default=0.8, ge=0.0, le=1.0)
+
+
+class BrandingUploadResponse(BaseModel):
+    branding_logo_path: str
+    branding_logo_url: str
 
 
 class PreviewSceneResponse(BaseModel):
     preview_video_path: str
     preview_video_url: str
+
+
+class SubtitleItem(BaseModel):
+    id: str = Field(min_length=1)
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(gt=0)
+    text: str = Field(min_length=1)
+
+
+class RenderSubtitlesVideoResponse(BaseModel):
+    video_path: str
+    video_url: str
+    source_video_path: Optional[str] = None
+    source_video_url: Optional[str] = None
 
 
 class PreviewSceneRequest(BaseModel):

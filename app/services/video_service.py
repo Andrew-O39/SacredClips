@@ -7,7 +7,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from moviepy import AudioFileClip, ColorClip, CompositeVideoClip, ImageClip, concatenate_videoclips
+from moviepy import AudioFileClip, ColorClip, CompositeVideoClip, ImageClip, VideoFileClip, concatenate_videoclips
 
 MIN_SCENE_CLIP = 0.25
 
@@ -98,6 +98,30 @@ def _normalize_subtitle_style(raw: object) -> str:
     if s in ("off", "minimal", "cinematic", "shorts"):
         return s
     return "off"
+
+
+def _normalize_branding_position(raw: object) -> str:
+    s = (raw if isinstance(raw, str) else str(raw or "")).strip().lower()
+    if s in ("top_left", "top_right", "bottom_left", "bottom_right"):
+        return s
+    return "bottom_right"
+
+
+def _normalize_branding_size(raw: object) -> str:
+    s = (raw if isinstance(raw, str) else str(raw or "")).strip().lower()
+    if s in ("small", "medium", "large"):
+        return s
+    return "medium"
+
+
+def _clamp_branding_opacity(raw: object) -> float:
+    if raw is None or raw == "":
+        return 0.8
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 0.8
+    return max(0.0, min(1.0, v))
 
 
 def _load_subtitle_font(size: int, bold: bool) -> ImageFont.ImageFont:
@@ -1108,8 +1132,27 @@ def _attach_audio_and_write(
     narration_clip: AudioFileClip | None,
     background_music: str,
     background_music_volume: float,
+    branding_enabled: bool = False,
+    branding_logo_path: Optional[str] = None,
+    branding_position: str = "bottom_right",
+    branding_size: str = "medium",
+    branding_opacity: float = 0.8,
 ):
     vd = float(video.duration)
+    width = int(getattr(video, "w", 0) or getattr(video, "size", [0, 0])[0])
+    height = int(getattr(video, "h", 0) or getattr(video, "size", [0, 0])[1])
+    video = _apply_branding_logo(
+        video,
+        branding_enabled=branding_enabled,
+        branding_logo_path=branding_logo_path,
+        branding_position=branding_position,
+        branding_size=branding_size,
+        branding_opacity=branding_opacity,
+        width=width,
+        height=height,
+        duration=vd,
+    )
+
     final_audio, _ = _compose_final_audio(
         narration_clip,
         vd,
@@ -1254,6 +1297,194 @@ def render_scene_preview(
     return output_path
 
 
+def _clip_with_start(clip, start: float):
+    try:
+        return clip.with_start(start)
+    except AttributeError:
+        return clip.set_start(start)
+
+
+def _apply_branding_logo(
+    video_clip,
+    *,
+    branding_enabled: bool = False,
+    branding_logo_path: Optional[str] = None,
+    branding_position: str = "bottom_right",
+    branding_size: str = "medium",
+    branding_opacity: float = 0.8,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    duration: Optional[float] = None,
+):
+    """Composite a logo watermark onto the full video without changing resolution or duration."""
+    if not branding_enabled:
+        return video_clip
+
+    fp = branding_logo_path
+    if not fp or not os.path.isfile(fp) or os.path.getsize(fp) <= 0:
+        print(f"[branding] logo missing or invalid at {fp!r}; skipping watermark")
+        return video_clip
+
+    w = width or int(getattr(video_clip, "w", 0) or getattr(video_clip, "size", [0, 0])[0])
+    h = height or int(getattr(video_clip, "h", 0) or getattr(video_clip, "size", [0, 0])[1])
+    d = float(duration if duration is not None else (video_clip.duration or 0))
+    if w <= 0 or h <= 0 or d <= 0:
+        print("[branding] invalid video dimensions; skipping watermark")
+        return video_clip
+
+    size_frac = {"small": 0.08, "medium": 0.12, "large": 0.16}.get(
+        _normalize_branding_size(branding_size), 0.12
+    )
+    target_w = max(16, int(w * size_frac))
+    margin_x = max(4, int(w * 0.03))
+    margin_y = max(4, int(h * 0.03))
+    opacity = _clamp_branding_opacity(branding_opacity)
+    pos_key = _normalize_branding_position(branding_position)
+
+    logo = None
+    try:
+        logo = ImageClip(fp)
+        lw = float(getattr(logo, "w", 0) or 1)
+        lh = float(getattr(logo, "h", 0) or 1)
+        target_h = max(8, int(round(target_w * lh / max(lw, 1.0))))
+        try:
+            logo = logo.resized(width=target_w, height=target_h)
+        except AttributeError:
+            logo = logo.resize(width=target_w, height=target_h)
+
+        try:
+            logo = logo.with_duration(d)
+        except AttributeError:
+            logo = logo.set_duration(d)
+
+        try:
+            logo = logo.with_opacity(opacity)
+        except AttributeError:
+            try:
+                logo = logo.set_opacity(opacity)
+            except Exception:
+                pass
+
+        logo_w = int(getattr(logo, "w", target_w))
+        logo_h = int(getattr(logo, "h", target_h))
+        if pos_key == "top_left":
+            pos = (margin_x, margin_y)
+        elif pos_key == "top_right":
+            pos = (w - logo_w - margin_x, margin_y)
+        elif pos_key == "bottom_left":
+            pos = (margin_x, h - logo_h - margin_y)
+        else:
+            pos = (w - logo_w - margin_x, h - logo_h - margin_y)
+
+        try:
+            logo = logo.with_position(pos)
+        except AttributeError:
+            logo = logo.set_position(pos)
+
+        try:
+            out = CompositeVideoClip([video_clip, logo], size=(w, h)).with_duration(d)
+        except AttributeError:
+            out = CompositeVideoClip([video_clip, logo], size=(w, h)).set_duration(d)
+        return out
+    except Exception as exc:
+        print(f"[branding] failed to apply logo watermark: {exc!r}")
+        traceback.print_exc()
+        if logo is not None:
+            try:
+                logo.close()
+            except Exception:
+                pass
+        return video_clip
+
+
+def render_subtitles_on_video(
+    *,
+    video_path: str,
+    output_path: str,
+    subtitles: List[dict],
+    subtitle_style: str,
+    branding_enabled: bool = False,
+    branding_logo_path: Optional[str] = None,
+    branding_position: str = "bottom_right",
+    branding_size: str = "medium",
+    branding_opacity: float = 0.8,
+) -> str:
+    """Burn manually timed subtitles onto an existing video without changing visuals."""
+    if not video_path or not os.path.isfile(video_path) or os.path.getsize(video_path) <= 0:
+        raise RuntimeError("render_subtitles_on_video: invalid video_path")
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    base = VideoFileClip(video_path)
+    overlays = []
+    final = base
+    try:
+        width = int(getattr(base, "w", 0) or getattr(base, "size", [0, 0])[0])
+        height = int(getattr(base, "h", 0) or getattr(base, "size", [0, 0])[1])
+        if width <= 0 or height <= 0:
+            raise RuntimeError("render_subtitles_on_video: could not determine video size")
+
+        duration = float(base.duration or 0.0)
+        if duration <= 0:
+            raise RuntimeError("render_subtitles_on_video: source video has no duration")
+
+        ss = _normalize_subtitle_style(subtitle_style)
+        aspect_hint = "9:16" if height > width else "16:9"
+
+        if ss != "off":
+            for item in subtitles:
+                text = str(item.get("text") or "").strip()
+                if not text:
+                    continue
+                start = max(0.0, float(item.get("start_seconds") or 0.0))
+                end = min(duration, float(item.get("end_seconds") or 0.0))
+                if end <= start + 0.04:
+                    continue
+                rgba = _render_subtitle_rgba_frame(width, height, text, ss, aspect_ratio=aspect_hint)
+                overlay = _imageclip_from_rgba(rgba, end - start)
+                overlays.append(_clip_with_start(overlay, start))
+
+        if overlays:
+            try:
+                final = CompositeVideoClip([base, *overlays], size=(width, height)).with_duration(duration)
+            except AttributeError:
+                final = CompositeVideoClip([base, *overlays], size=(width, height)).set_duration(duration)
+
+        final = _apply_branding_logo(
+            final,
+            branding_enabled=branding_enabled,
+            branding_logo_path=branding_logo_path,
+            branding_position=branding_position,
+            branding_size=branding_size,
+            branding_opacity=branding_opacity,
+            width=width,
+            height=height,
+            duration=duration,
+        )
+
+        write_kw: dict = {"fps": getattr(base, "fps", None) or 24, "codec": "libx264"}
+        if getattr(base, "audio", None) is not None:
+            write_kw["audio_codec"] = "aac"
+        else:
+            write_kw["audio"] = False
+        final.write_videofile(output_path, **write_kw)
+        return output_path
+    finally:
+        for clip in overlays:
+            try:
+                clip.close()
+            except Exception:
+                pass
+        if final is not base:
+            try:
+                final.close()
+            except Exception:
+                pass
+        try:
+            base.close()
+        except Exception:
+            pass
+
+
 def render_video(
     image_paths: List[str],
     audio_path: str,
@@ -1268,6 +1499,11 @@ def render_video(
     motion_intensity: str = "subtle",
     subtitle_style: str = "off",
     subtitle_texts: Optional[List[str]] = None,
+    branding_enabled: bool = False,
+    branding_logo_path: Optional[str] = None,
+    branding_position: str = "bottom_right",
+    branding_size: str = "medium",
+    branding_opacity: float = 0.8,
 ) -> str:
     os.makedirs(output_dir, exist_ok=True)
     output_path = str(Path(output_dir) / filename)
@@ -1351,6 +1587,11 @@ def render_video(
             audio_clip,
             background_music,
             background_music_volume,
+            branding_enabled=branding_enabled,
+            branding_logo_path=branding_logo_path,
+            branding_position=branding_position,
+            branding_size=branding_size,
+            branding_opacity=branding_opacity,
         )
         return output_path
 
@@ -1410,5 +1651,10 @@ def render_video(
         None,
         background_music,
         background_music_volume,
+        branding_enabled=branding_enabled,
+        branding_logo_path=branding_logo_path,
+        branding_position=branding_position,
+        branding_size=branding_size,
+        branding_opacity=branding_opacity,
     )
     return output_path

@@ -25,10 +25,10 @@ type Scene = {
   image_path?: string | null
 }
 
-type CreationMode = 'ai' | 'manual'
+type CreationMode = 'ai' | 'manual' | 'existing'
 type ManualImageMode = 'upload' | 'generate' | 'placeholder'
 type ManualNarrationSource = 'tts' | 'upload'
-type GenerationProfile = 'ai' | 'manual_tts' | 'manual_upload' | 'regenerate'
+type GenerationProfile = 'ai' | 'manual_tts' | 'manual_upload' | 'regenerate' | 'subtitles'
 type ImageFitMode = 'fit' | 'fill'
 
 type BackgroundMusic = 'none' | 'peaceful_piano' | 'ambient_pad' | 'soft_strings' | 'gentle_choir'
@@ -38,6 +38,14 @@ type MotionEffect = 'none' | 'gentle_zoom' | 'slow_pan' | 'ken_burns'
 type MotionIntensity = 'subtle' | 'medium' | 'strong'
 
 type SubtitleStyle = 'off' | 'minimal' | 'cinematic' | 'shorts'
+
+type BrandingPosition = 'top_left' | 'top_right' | 'bottom_left' | 'bottom_right'
+type BrandingSize = 'small' | 'medium' | 'large'
+
+type BrandingUploadResponse = {
+  branding_logo_path: string
+  branding_logo_url: string
+}
 
 function roundToHalfSecond(value: number): number {
   return Math.max(0.5, Math.round(value * 2) / 2)
@@ -184,6 +192,20 @@ type YouTubePublishResponse = {
   youtube_url: string
 }
 
+type ExistingSubtitleItem = {
+  id: string
+  start_seconds: number
+  end_seconds: number
+  text: string
+}
+
+type RenderSubtitlesVideoResponse = {
+  video_path: string
+  video_url: string
+  source_video_path?: string | null
+  source_video_url?: string | null
+}
+
 export const App: React.FC = () => {
   const [creationMode, setCreationMode] = useState<CreationMode>('ai')
   const [videoType, setVideoType] = useState<VideoType>('normal')
@@ -198,6 +220,14 @@ export const App: React.FC = () => {
   const [motionEffect, setMotionEffect] = useState<MotionEffect>('gentle_zoom')
   const [motionIntensity, setMotionIntensity] = useState<MotionIntensity>('subtle')
   const [subtitleStyle, setSubtitleStyle] = useState<SubtitleStyle>('off')
+  const [brandingEnabled, setBrandingEnabled] = useState(false)
+  const [brandingLogoPath, setBrandingLogoPath] = useState('')
+  const [brandingLogoUrl, setBrandingLogoUrl] = useState('')
+  const [brandingLogoPreviewUrl, setBrandingLogoPreviewUrl] = useState('')
+  const [brandingPosition, setBrandingPosition] = useState<BrandingPosition>('bottom_right')
+  const [brandingSize, setBrandingSize] = useState<BrandingSize>('medium')
+  const [brandingOpacity, setBrandingOpacity] = useState(0.8)
+  const [brandingUploading, setBrandingUploading] = useState(false)
   const [editedScenes, setEditedScenes] = useState<Scene[]>([])
   const [manualUploads, setManualUploads] = useState<Record<number, File | undefined>>({})
   const [manualImageModes, setManualImageModes] = useState<Record<number, ManualImageMode>>({})
@@ -214,8 +244,19 @@ export const App: React.FC = () => {
   const [scenePreviewUrlByIndex, setScenePreviewUrlByIndex] = useState<Record<number, string>>({})
   const [scenePreviewLoadingIndex, setScenePreviewLoadingIndex] = useState<number | null>(null)
   const [scenePreviewNonce, setScenePreviewNonce] = useState(0)
+  const [uploadedVideoFile, setUploadedVideoFile] = useState<File | undefined>(undefined)
+  const [uploadedVideoUrl, setUploadedVideoUrl] = useState('')
+  const [existingSourceVideoPath, setExistingSourceVideoPath] = useState('')
+  const [existingSourceVideoUrl, setExistingSourceVideoUrl] = useState('')
+  const [existingVideoCurrentTime, setExistingVideoCurrentTime] = useState(0)
+  const [activeExistingSubtitlePreviewId, setActiveExistingSubtitlePreviewId] = useState<string | null>(null)
+  const [existingSubtitles, setExistingSubtitles] = useState<ExistingSubtitleItem[]>([
+    { id: 'subtitle-1', start_seconds: 0, end_seconds: 4.5, text: "Welcome to today's lesson." },
+  ])
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const existingVideoPreviewRef = useRef<HTMLVideoElement | null>(null)
+  const existingSubtitlePreviewEndRef = useRef<number | null>(null)
   /** Shared element for manual per-scene narration segment preview (upload mode only). */
   const sceneAudioPreviewRef = useRef<HTMLAudioElement | null>(null)
   const sceneSegmentEndRef = useRef<number | null>(null)
@@ -265,9 +306,99 @@ export const App: React.FC = () => {
     return m
   }, [editedScenes])
 
+  const activeExistingSubtitle = useMemo(
+    () =>
+      existingSubtitles.find(
+        s =>
+          subtitleStyle !== 'off' &&
+          s.text.trim() &&
+          existingVideoCurrentTime >= s.start_seconds &&
+          existingVideoCurrentTime < s.end_seconds,
+      ),
+    [existingSubtitles, existingVideoCurrentTime, subtitleStyle],
+  )
+
+  const existingVideoPreviewSrc = uploadedVideoUrl || (existingSourceVideoUrl ? `${API_BASE_URL}${existingSourceVideoUrl}` : '')
+
   const durationMin = videoType === 'normal' ? 120 : 60
   const durationMax = videoType === 'normal' ? 600 : 90
   const durationStep = videoType === 'normal' ? 30 : 5
+
+  function brandingApiFields(): Record<string, unknown> {
+    if (!brandingEnabled) {
+      return { branding_enabled: false }
+    }
+    return {
+      branding_enabled: true,
+      ...(brandingLogoPath ? { branding_logo_path: brandingLogoPath } : {}),
+      branding_position: brandingPosition,
+      branding_size: brandingSize,
+      branding_opacity: brandingOpacity,
+    }
+  }
+
+  function appendBrandingToFormData(fd: FormData) {
+    fd.append('branding_enabled', brandingEnabled ? 'true' : 'false')
+    if (brandingLogoPath) {
+      fd.append('branding_logo_path', brandingLogoPath)
+    }
+    fd.append('branding_position', brandingPosition)
+    fd.append('branding_size', brandingSize)
+    fd.append('branding_opacity', String(brandingOpacity))
+  }
+
+  const brandingLogoDisplayUrl =
+    brandingLogoPreviewUrl ||
+    (brandingLogoUrl ? `${API_BASE_URL}${brandingLogoUrl}` : '')
+
+  async function handleBrandingLogoSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    const allowed = ['image/png', 'image/jpeg', 'image/webp']
+    if (!allowed.includes(file.type)) {
+      setError('Logo must be PNG, JPEG, or WebP.')
+      return
+    }
+    setError(null)
+    const localPreview = URL.createObjectURL(file)
+    setBrandingLogoPreviewUrl(prev => {
+      if (prev.startsWith('blob:')) URL.revokeObjectURL(prev)
+      return localPreview
+    })
+    setBrandingUploading(true)
+    try {
+      const fd = new FormData()
+      fd.append('logo', file)
+      const res = await fetch(`${API_BASE_URL}/branding/upload`, { method: 'POST', body: fd })
+      if (!res.ok) {
+        const text = await res.text()
+        throw new Error(text || 'Logo upload failed')
+      }
+      const data: BrandingUploadResponse = await res.json()
+      setBrandingLogoPath(data.branding_logo_path)
+      setBrandingLogoUrl(data.branding_logo_url)
+      setBrandingEnabled(true)
+    } catch (err: any) {
+      console.error(err)
+      setError(err.message || 'Logo upload failed')
+      setBrandingLogoPreviewUrl(prev => {
+        if (prev.startsWith('blob:')) URL.revokeObjectURL(prev)
+        return ''
+      })
+    } finally {
+      setBrandingUploading(false)
+    }
+  }
+
+  function clearBrandingLogo() {
+    setBrandingLogoPath('')
+    setBrandingLogoUrl('')
+    setBrandingLogoPreviewUrl(prev => {
+      if (prev.startsWith('blob:')) URL.revokeObjectURL(prev)
+      return ''
+    })
+  }
 
   function stopManualSceneAudioPreview() {
     const el = sceneAudioPreviewRef.current
@@ -331,6 +462,53 @@ export const App: React.FC = () => {
     }
   }
 
+  function stopExistingSubtitlePreview() {
+    const el = existingVideoPreviewRef.current
+    if (el) el.pause()
+    existingSubtitlePreviewEndRef.current = null
+    setActiveExistingSubtitlePreviewId(null)
+  }
+
+  function syncExistingVideoPreviewTime(el: HTMLVideoElement) {
+    setExistingVideoCurrentTime(el.currentTime)
+    const end = existingSubtitlePreviewEndRef.current
+    if (end != null && el.currentTime >= end - 0.04) {
+      el.pause()
+      existingSubtitlePreviewEndRef.current = null
+      setActiveExistingSubtitlePreviewId(null)
+    }
+  }
+
+  function toggleExistingSubtitlePreview(item: ExistingSubtitleItem) {
+    const el = existingVideoPreviewRef.current
+    if (!el || !existingVideoPreviewSrc) return
+
+    if (activeExistingSubtitlePreviewId === item.id) {
+      stopExistingSubtitlePreview()
+      return
+    }
+
+    const start = Math.max(0, item.start_seconds)
+    const end = Math.max(start, item.end_seconds)
+    if (end <= start + 0.04) return
+
+    el.pause()
+    existingSubtitlePreviewEndRef.current = end
+    el.currentTime = start
+    setExistingVideoCurrentTime(start)
+    const playPromise = el.play()
+    if (playPromise !== undefined) {
+      playPromise
+        .then(() => setActiveExistingSubtitlePreviewId(item.id))
+        .catch(() => {
+          existingSubtitlePreviewEndRef.current = null
+          setActiveExistingSubtitlePreviewId(null)
+        })
+    } else {
+      setActiveExistingSubtitlePreviewId(item.id)
+    }
+  }
+
   const beginGenerationProgress = (profile: GenerationProfile) => {
     setGenerationProfile(profile)
     setGenerationStage('Preparing request')
@@ -360,6 +538,71 @@ export const App: React.FC = () => {
   const clearScenePreviews = () => {
     setScenePreviewUrlByIndex({})
     setScenePreviewLoadingIndex(null)
+  }
+
+  const clearExistingVideoResult = () => {
+    if (creationMode === 'existing') {
+      setResult(null)
+      setYoutubeSuccessUrl(null)
+      setYoutubeError(null)
+      setVideoVersion(0)
+    }
+  }
+
+  const updateExistingSubtitle = (id: string, patch: Partial<ExistingSubtitleItem>) => {
+    stopExistingSubtitlePreview()
+    setExistingSubtitles(prev => prev.map(s => (s.id === id ? { ...s, ...patch } : s)))
+    clearExistingVideoResult()
+  }
+
+  const addExistingSubtitle = () => {
+    stopExistingSubtitlePreview()
+    setExistingSubtitles(prev => {
+      const last = prev[prev.length - 1]
+      const start = last ? Math.max(0, last.end_seconds) : 0
+      return [
+        ...prev,
+        {
+          id: `subtitle-${Date.now()}`,
+          start_seconds: start,
+          end_seconds: start + 4,
+          text: 'New subtitle',
+        },
+      ]
+    })
+    clearExistingVideoResult()
+  }
+
+  const duplicateExistingSubtitle = (id: string) => {
+    stopExistingSubtitlePreview()
+    setExistingSubtitles(prev => {
+      const idx = prev.findIndex(s => s.id === id)
+      if (idx < 0) return prev
+      const source = prev[idx]
+      const dup = {
+        ...source,
+        id: `subtitle-${Date.now()}`,
+        start_seconds: source.end_seconds,
+        end_seconds: source.end_seconds + Math.max(0.5, source.end_seconds - source.start_seconds),
+      }
+      return [...prev.slice(0, idx + 1), dup, ...prev.slice(idx + 1)]
+    })
+    clearExistingVideoResult()
+  }
+
+  const removeExistingSubtitle = (id: string) => {
+    stopExistingSubtitlePreview()
+    setExistingSubtitles(prev => (prev.length <= 1 ? prev : prev.filter(s => s.id !== id)))
+    clearExistingVideoResult()
+  }
+
+  const handleExistingVideoFileChange = (file: File | undefined) => {
+    stopExistingSubtitlePreview()
+    setUploadedVideoFile(file)
+    setExistingSourceVideoPath('')
+    setExistingSourceVideoUrl('')
+    setExistingVideoCurrentTime(0)
+    clearExistingVideoResult()
   }
 
   const updateReplacementUploadForScene = (sceneIndex: number, file: File | undefined) => {
@@ -392,12 +635,22 @@ export const App: React.FC = () => {
 
   const resetToNewVideo = () => {
     stopManualSceneAudioPreview()
+    stopExistingSubtitlePreview()
     setResult(null)
     setEditedScript('')
     setEditedScenes([])
     setManualUploads({})
     setManualImageModes({})
     setManualAudioUpload(undefined)
+    setUploadedVideoFile(undefined)
+    setUploadedVideoUrl('')
+    setExistingSourceVideoPath('')
+    setExistingSourceVideoUrl('')
+    setExistingVideoCurrentTime(0)
+    setActiveExistingSubtitlePreviewId(null)
+    setExistingSubtitles([
+      { id: 'subtitle-1', start_seconds: 0, end_seconds: 4.5, text: "Welcome to today's lesson." },
+    ])
     setPersistedManualNarration(null)
     clearReplacementUploadState()
     clearScenePreviews()
@@ -437,6 +690,7 @@ export const App: React.FC = () => {
           motion_effect: motionEffect,
           motion_intensity: motionIntensity,
           subtitle_style: subtitleStyle,
+          ...brandingApiFields(),
         }),
       })
 
@@ -512,6 +766,7 @@ export const App: React.FC = () => {
       fd.append('motion_intensity', motionIntensity)
       fd.append('subtitle_style', subtitleStyle)
       fd.append('narration_source', manualNarrationSource)
+      appendBrandingToFormData(fd)
       if (manualNarrationSource === 'upload' && manualAudioUpload) {
         fd.append('audio_upload', manualAudioUpload)
       }
@@ -563,10 +818,80 @@ export const App: React.FC = () => {
     }
   }
 
+  const handleRenderExistingVideoSubtitles = async () => {
+    if (!uploadedVideoFile && !existingSourceVideoPath) {
+      setError('Upload an existing video first.')
+      return
+    }
+    const cleanSubtitles = existingSubtitles
+      .map(s => ({
+        ...s,
+        start_seconds: Number.isFinite(s.start_seconds) ? Math.max(0, s.start_seconds) : 0,
+        end_seconds: Number.isFinite(s.end_seconds) ? Math.max(0, s.end_seconds) : 0,
+        text: s.text.trim(),
+      }))
+      .filter(s => s.text && s.end_seconds > s.start_seconds)
+    if (subtitleStyle !== 'off' && cleanSubtitles.length === 0) {
+      setError('Add at least one valid subtitle segment, or set subtitles to Off.')
+      return
+    }
+    setError(null)
+    setResult(null)
+    beginGenerationProgress('subtitles')
+    setLoading(true)
+    stopExistingSubtitlePreview()
+    setYoutubeError(null)
+    setYoutubeSuccessUrl(null)
+    try {
+      const fd = new FormData()
+      fd.append('topic', topic)
+      fd.append('subtitle_style', subtitleStyle)
+      fd.append('subtitles_json', JSON.stringify(cleanSubtitles))
+      appendBrandingToFormData(fd)
+      if (existingSourceVideoPath) {
+        fd.append('source_video_path', existingSourceVideoPath)
+      } else if (uploadedVideoFile) {
+        fd.append('video_upload', uploadedVideoFile)
+      }
+
+      const res = await fetch(`${API_BASE_URL}/render-subtitles-video`, {
+        method: 'POST',
+        body: fd,
+      })
+      if (!res.ok) {
+        const text = await res.text()
+        throw new Error(text || 'Subtitle render failed')
+      }
+      const data: RenderSubtitlesVideoResponse = await res.json()
+      await finishGenerationProgress()
+      const scriptText = cleanSubtitles.map(s => s.text).join('\n')
+      setExistingSourceVideoPath(data.source_video_path || existingSourceVideoPath)
+      setExistingSourceVideoUrl(data.source_video_url || existingSourceVideoUrl)
+      setResult({
+        video_path: data.video_path,
+        video_url: data.video_url,
+        script_text: scriptText || 'Existing video with subtitles.',
+        scenes: [],
+        used_ai: false,
+        narration_source: null,
+        narration_audio_path: null,
+      })
+      setVideoVersion(prev => prev + 1)
+      setYoutubeTitle(topic)
+      setYoutubeDescription(scriptText)
+    } catch (err: any) {
+      console.error(err)
+      setError(err.message || 'Subtitle render failed')
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (creationMode === 'ai') handleAiGenerate()
-    else handleManualCreate()
+    else if (creationMode === 'manual') handleManualCreate()
+    else handleRenderExistingVideoSubtitles()
   }
 
   const handleRebuildFromScenes = async () => {
@@ -625,6 +950,7 @@ export const App: React.FC = () => {
         fd.append('motion_effect', motionEffect)
         fd.append('motion_intensity', motionIntensity)
         fd.append('subtitle_style', subtitleStyle)
+        appendBrandingToFormData(fd)
 
         if (persistedManualNarration) {
           fd.append('narration_source', 'upload')
@@ -686,6 +1012,7 @@ export const App: React.FC = () => {
             motion_intensity: motionIntensity,
             subtitle_style: subtitleStyle,
             ...narrationPayload,
+            ...brandingApiFields(),
           }),
         })
 
@@ -788,6 +1115,9 @@ export const App: React.FC = () => {
   const handleCreationModeChange = (m: CreationMode) => {
     setCreationMode(m)
     setError(null)
+    setResult(null)
+    setYoutubeSuccessUrl(null)
+    setYoutubeError(null)
     if (m === 'manual' && !result) {
       setEditedScenes(prev =>
         prev.length
@@ -1131,6 +1461,12 @@ export const App: React.FC = () => {
         { threshold: 92, label: 'Rendering video' },
         { threshold: 95, label: 'Finalizing video' },
       ],
+      subtitles: [
+        { threshold: 25, label: 'Uploading video' },
+        { threshold: 55, label: 'Preparing subtitles' },
+        { threshold: 92, label: 'Burning subtitles' },
+        { threshold: 95, label: 'Finalizing video' },
+      ],
     }
 
     const stagePlan = stagePlanByProfile[generationProfile]
@@ -1154,6 +1490,22 @@ export const App: React.FC = () => {
     if (!el) return
     el.volume = Math.min(1, Math.max(0, backgroundMusicVolume))
   }, [backgroundMusicVolume, backgroundMusic])
+
+  useEffect(() => {
+    if (!uploadedVideoFile) {
+      stopExistingSubtitlePreview()
+      setUploadedVideoUrl('')
+      setExistingVideoCurrentTime(0)
+      return undefined
+    }
+    const url = URL.createObjectURL(uploadedVideoFile)
+    setUploadedVideoUrl(url)
+    setExistingVideoCurrentTime(0)
+    return () => {
+      stopExistingSubtitlePreview()
+      URL.revokeObjectURL(url)
+    }
+  }, [uploadedVideoFile])
 
   useEffect(() => {
     const shouldPreview =
@@ -1383,10 +1735,19 @@ export const App: React.FC = () => {
                   />
                   Manual mode
                 </label>
+                <label className="radio-label">
+                  <input
+                    type="radio"
+                    name="creation-mode"
+                    checked={creationMode === 'existing'}
+                    onChange={() => handleCreationModeChange('existing')}
+                  />
+                  Existing video + subtitles
+                </label>
               </div>
               <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
-                AI generates script and images. Manual mode uses your pasted script, optional uploads per scene,
-                TTS, and local rendering — no AI scriptwriter.
+                AI generates a new clip. Manual mode builds from your script/uploads. Existing video mode only burns
+                subtitles onto a video you provide.
               </p>
             </div>
 
@@ -1593,6 +1954,146 @@ export const App: React.FC = () => {
               </div>
             )}
 
+            {creationMode === 'existing' && (
+              <div className="editor-section">
+                <div>
+                  <div className="field-label">Existing video</div>
+                  <input
+                    type="file"
+                    accept=".mp4,.mov,.mkv,.webm,video/mp4,video/quicktime,video/x-matroska,video/webm"
+                    onChange={e => handleExistingVideoFileChange(e.target.files?.[0])}
+                  />
+                  <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
+                    Upload an MP4, MOV, MKV, or WebM. SacredClips will preserve the visuals and burn subtitles onto it.
+                  </p>
+                  {existingSourceVideoPath && !uploadedVideoFile ? (
+                    <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
+                      Reusing uploaded source video from the previous render. You can re-render subtitles without
+                      uploading it again.
+                    </p>
+                  ) : null}
+                </div>
+
+                {existingVideoPreviewSrc ? (
+                  <div>
+                    <div className="field-label">Subtitle style preview</div>
+                    <div className="existing-video-preview">
+                      <video
+                        ref={existingVideoPreviewRef}
+                        controls
+                        src={existingVideoPreviewSrc}
+                        onTimeUpdate={e => syncExistingVideoPreviewTime(e.currentTarget)}
+                        onSeeked={e => syncExistingVideoPreviewTime(e.currentTarget)}
+                        onLoadedMetadata={e => syncExistingVideoPreviewTime(e.currentTarget)}
+                        onPause={() => {
+                          if (activeExistingSubtitlePreviewId) {
+                            existingSubtitlePreviewEndRef.current = null
+                            setActiveExistingSubtitlePreviewId(null)
+                          }
+                        }}
+                      />
+                      {activeExistingSubtitle && (
+                        <div className={`existing-subtitle-overlay existing-subtitle-overlay--${subtitleStyle}`}>
+                          {activeExistingSubtitle.text}
+                        </div>
+                      )}
+                    </div>
+                    <p className="footer-hint">
+                      This is a browser preview only. The final render burns subtitles into the uploaded video.
+                    </p>
+                  </div>
+                ) : null}
+
+                <div>
+                  <div className="section-header-row">
+                    <div className="field-label">Subtitle segments</div>
+                    <button type="button" className="tiny-button" onClick={addExistingSubtitle}>
+                      + Add subtitle
+                    </button>
+                  </div>
+                  <p className="footer-hint" style={{ marginTop: '0.25rem' }}>
+                    Preview a segment to check whether the subtitle appears at the right moment.
+                  </p>
+                  <div className="subtitle-segment-timeline">
+                    <div className="subtitle-segment-track">
+                    {existingSubtitles.map((item, idx) => (
+                      <div key={item.id} className="subtitle-segment-card">
+                        <div className="scene-card-header">
+                          <div className="scene-title">Subtitle {idx + 1}</div>
+                          <div className="scene-card-actions">
+                            <button
+                              type="button"
+                              className="tiny-button"
+                              onClick={() => toggleExistingSubtitlePreview(item)}
+                              disabled={!existingVideoPreviewSrc || loading}
+                            >
+                              {activeExistingSubtitlePreviewId === item.id ? 'Stop preview' : 'Preview segment'}
+                            </button>
+                            <button
+                              type="button"
+                              className="tiny-button"
+                              onClick={() => duplicateExistingSubtitle(item.id)}
+                            >
+                              Duplicate
+                            </button>
+                            <button
+                              type="button"
+                              className="tiny-button"
+                              onClick={() => removeExistingSubtitle(item.id)}
+                              disabled={existingSubtitles.length <= 1}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </div>
+                        <div className="subtitle-time-grid">
+                          <label>
+                            <span className="field-label">Start</span>
+                            <input
+                              className="input"
+                              type="number"
+                              min={0}
+                              step={0.1}
+                              value={item.start_seconds}
+                              onChange={e =>
+                                updateExistingSubtitle(item.id, {
+                                  start_seconds: Number.parseFloat(e.target.value.replace(',', '.')) || 0,
+                                })
+                              }
+                            />
+                          </label>
+                          <label>
+                            <span className="field-label">End</span>
+                            <input
+                              className="input"
+                              type="number"
+                              min={0}
+                              step={0.1}
+                              value={item.end_seconds}
+                              onChange={e =>
+                                updateExistingSubtitle(item.id, {
+                                  end_seconds: Number.parseFloat(e.target.value.replace(',', '.')) || 0,
+                                })
+                              }
+                            />
+                          </label>
+                        </div>
+                        <div className="field-label">Text</div>
+                        <textarea
+                          className="textarea"
+                          rows={3}
+                          value={item.text}
+                          onChange={e => updateExistingSubtitle(item.id, { text: e.target.value })}
+                        />
+                      </div>
+                    ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {creationMode !== 'existing' && (
             <div>
               <div className="field-label">Visual style {creationMode === 'ai' ? '(AI images)' : '(placeholders)'}</div>
               <select
@@ -1607,7 +2108,9 @@ export const App: React.FC = () => {
                 ))}
               </select>
             </div>
+            )}
 
+            {creationMode !== 'existing' && (
             <div>
               <div className="field-label">Content format</div>
               <select
@@ -1624,7 +2127,9 @@ export const App: React.FC = () => {
                   : 'Output format: 9:16 vertical'}
               </p>
             </div>
+            )}
 
+            {creationMode !== 'existing' && (
             <div>
               <div className="field-label">Image fit</div>
               <select
@@ -1642,7 +2147,9 @@ export const App: React.FC = () => {
                 Fill screen / crop: fills the frame, may crop image edges.
               </p>
             </div>
+            )}
 
+            {creationMode !== 'existing' && (
             <div>
               <div className="field-label">Background music</div>
               <select
@@ -1688,7 +2195,9 @@ export const App: React.FC = () => {
                 </>
               )}
             </div>
+            )}
 
+            {creationMode !== 'existing' && (
             <div>
               <div className="field-label">Motion effect</div>
               <select
@@ -1705,7 +2214,9 @@ export const App: React.FC = () => {
                 Adds subtle motion to still images. Ken Burns gently zooms and pans across the image.
               </p>
             </div>
+            )}
 
+            {creationMode !== 'existing' && (
             <div style={{ opacity: motionEffect === 'none' ? 0.55 : 1 }}>
               <div className="field-label">Motion intensity</div>
               <select
@@ -1722,13 +2233,17 @@ export const App: React.FC = () => {
                 Controls how noticeable the image movement feels.
               </p>
             </div>
+            )}
 
             <div>
               <div className="field-label">Subtitles</div>
               <select
                 className="select input-full"
                 value={subtitleStyle}
-                onChange={e => setSubtitleStyle(e.target.value as SubtitleStyle)}
+                onChange={e => {
+                  setSubtitleStyle(e.target.value as SubtitleStyle)
+                  clearExistingVideoResult()
+                }}
               >
                 <option value="off">Off</option>
                 <option value="minimal">Minimal</option>
@@ -1736,12 +2251,102 @@ export const App: React.FC = () => {
                 <option value="shorts">Shorts style</option>
               </select>
               <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
-                Subtitles are split into readable chunks during each scene. Shorts and vertical (9:16) use shorter
-                lines and up to three lines when needed. For best timing with uploaded narration, use shorter scene
-                text or create more scene cuts where the spoken lines change.
+                {creationMode === 'existing'
+                  ? 'Manual subtitle segments use the exact start and end times you enter.'
+                  : 'Subtitles are split into readable chunks during each scene. Shorts and vertical (9:16) use shorter lines and up to three lines when needed. For best timing with uploaded narration, use shorter scene text or create more scene cuts where the spoken lines change.'}
               </p>
             </div>
 
+            <div className="branding-section">
+              <div className="field-label">Branding / logo</div>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={brandingEnabled}
+                  onChange={e => setBrandingEnabled(e.target.checked)}
+                />
+                <span>Enable logo watermark</span>
+              </label>
+              {brandingEnabled && (
+                <>
+                  <div className="branding-upload-row">
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp"
+                      onChange={handleBrandingLogoSelect}
+                      disabled={brandingUploading}
+                    />
+                    {brandingLogoPath && (
+                      <button
+                        type="button"
+                        className="button button-secondary"
+                        onClick={clearBrandingLogo}
+                      >
+                        Remove logo
+                      </button>
+                    )}
+                  </div>
+                  {brandingUploading && (
+                    <p className="footer-hint">Uploading logo…</p>
+                  )}
+                  {brandingLogoDisplayUrl && (
+                    <div className="branding-logo-preview-wrap">
+                      <img
+                        src={brandingLogoDisplayUrl}
+                        alt="Logo preview"
+                        className="branding-logo-preview"
+                      />
+                    </div>
+                  )}
+                  <div className="field-label" style={{ marginTop: '0.75rem' }}>
+                    Position
+                  </div>
+                  <select
+                    className="select input-full"
+                    value={brandingPosition}
+                    onChange={e => setBrandingPosition(e.target.value as BrandingPosition)}
+                  >
+                    <option value="top_left">Top left</option>
+                    <option value="top_right">Top right</option>
+                    <option value="bottom_left">Bottom left</option>
+                    <option value="bottom_right">Bottom right</option>
+                  </select>
+                  <div className="field-label" style={{ marginTop: '0.75rem' }}>
+                    Size
+                  </div>
+                  <select
+                    className="select input-full"
+                    value={brandingSize}
+                    onChange={e => setBrandingSize(e.target.value as BrandingSize)}
+                  >
+                    <option value="small">Small</option>
+                    <option value="medium">Medium</option>
+                    <option value="large">Large</option>
+                  </select>
+                  <div className="field-label" style={{ marginTop: '0.75rem' }}>
+                    Opacity ({Math.round(brandingOpacity * 100)}%)
+                  </div>
+                  <div className="range-row">
+                    <div className="range-input">
+                      <input
+                        type="range"
+                        min={0.1}
+                        max={1}
+                        step={0.05}
+                        value={brandingOpacity}
+                        onChange={e => setBrandingOpacity(Number(e.target.value))}
+                        style={{ width: '100%' }}
+                      />
+                    </div>
+                  </div>
+                  <p className="footer-hint" style={{ marginTop: '0.35rem' }}>
+                    Upload once; the logo path is reused for AI, manual, and existing-video renders.
+                  </p>
+                </>
+              )}
+            </div>
+
+            {creationMode !== 'existing' && (
             <div>
               <div className="field-label">
                 Desired video length ({durationMin}s–{durationMax}s)
@@ -1761,6 +2366,7 @@ export const App: React.FC = () => {
                 <div className="range-value">{duration}s</div>
               </div>
             </div>
+            )}
 
             {editedScenes.length > 0 && creationMode === 'manual' && !result && (
               <div>
@@ -1940,10 +2546,16 @@ export const App: React.FC = () => {
               {loading
                 ? creationMode === 'ai'
                   ? 'Generating sacred clip…'
-                  : 'Building manual clip…'
+                  : creationMode === 'existing'
+                    ? 'Rendering subtitles…'
+                    : 'Building manual clip…'
                 : creationMode === 'ai'
                   ? 'Generate video'
-                  : 'Create manual video'}
+                  : creationMode === 'existing'
+                    ? existingSourceVideoPath
+                      ? 'Re-render subtitles'
+                      : 'Render subtitled video'
+                    : 'Create manual video'}
             </button>
           </form>
           </section>
@@ -1956,7 +2568,12 @@ export const App: React.FC = () => {
                     result.used_ai ? 'alert-success' : 'alert-warning'
                   }`}
                 >
-                  {result.used_ai ? (
+                  {creationMode === 'existing' ? (
+                    <>
+                      <strong>Existing video:</strong> Subtitles were burned onto your uploaded video. Original source
+                      visuals were preserved.
+                    </>
+                  ) : result.used_ai ? (
                     <>
                       <strong>AI mode:</strong> This clip uses AI-generated script, images, and narration.
                     </>
@@ -2002,6 +2619,7 @@ export const App: React.FC = () => {
                 </p>
               </section>
 
+              {creationMode !== 'existing' && (
               <section className="editor-section">
                 <div className="section-header-row">
                   <div className="small-label">Script</div>
@@ -2049,7 +2667,9 @@ export const App: React.FC = () => {
                   <div className="script-preview-block">{result.script_text}</div>
                 )}
               </section>
+              )}
 
+              {creationMode !== 'existing' && (
               <section className="editor-section">
                 <div className="section-header-row">
                   <div className="small-label">Scene editor</div>
@@ -2238,6 +2858,7 @@ export const App: React.FC = () => {
                   {loading ? 'Regenerating…' : 'Regenerate video from scene edits'}
                 </button>
               </section>
+              )}
 
               <section className="editor-section editor-section--youtube">
                 <div className="section-header-row">
