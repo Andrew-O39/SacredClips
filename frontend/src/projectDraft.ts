@@ -1,6 +1,59 @@
 export const PROJECT_DRAFT_KEY = 'sacredclips-project-draft'
 export const DRAFT_VERSION = 1
 
+export const DEFAULT_PROJECT_TOPIC = 'What is baptism in Christianity?'
+export const DEFAULT_PROJECT_STYLE = 'neutral explainer, gentle and respectful tone'
+export const DEFAULT_PROJECT_VISUAL_STYLE = 'Classical sacred art'
+export const DEFAULT_EXISTING_SUBTITLE_DURATION_SEC = 12
+
+export function createDefaultExistingSubtitles(): DraftExistingSubtitle[] {
+  return [
+    {
+      id: 'subtitle-1',
+      start_seconds: 0,
+      end_seconds: DEFAULT_EXISTING_SUBTITLE_DURATION_SEC,
+      text: "Welcome to today's lesson.",
+    },
+  ]
+}
+
+export function createDefaultProjectDraft(): ProjectDraft {
+  return {
+    version: DRAFT_VERSION,
+    savedAt: new Date().toISOString(),
+    creationMode: 'ai',
+    topic: DEFAULT_PROJECT_TOPIC,
+    style: DEFAULT_PROJECT_STYLE,
+    videoType: 'normal',
+    duration: 180,
+    aspectRatio: '16:9',
+    imageFitMode: 'fit',
+    visualStyle: DEFAULT_PROJECT_VISUAL_STYLE,
+    editedScript: '',
+    editedScenes: [],
+    manualImageModes: {},
+    manualNarrationSource: 'tts',
+    persistedManualNarration: null,
+    existingSubtitles: createDefaultExistingSubtitles(),
+    existingSourceVideoPath: '',
+    existingSourceVideoUrl: '',
+    backgroundMusic: 'none',
+    backgroundMusicVolume: 0.12,
+    motionEffect: 'gentle_zoom',
+    motionIntensity: 'subtle',
+    subtitleStyle: 'off',
+    brandingEnabled: false,
+    brandingLogoPath: '',
+    brandingLogoUrl: '',
+    brandingPosition: 'bottom_right',
+    brandingSize: 'medium',
+    brandingOpacity: 0.8,
+    activeRenderJobId: null,
+    latestResult: null,
+    editMode: false,
+  }
+}
+
 export type DraftCreationMode = 'ai' | 'manual' | 'existing'
 export type DraftVideoType = 'normal' | 'shorts'
 export type DraftAspectRatio = '16:9' | '9:16' | '1:1'

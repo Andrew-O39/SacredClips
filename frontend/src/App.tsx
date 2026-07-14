@@ -11,6 +11,10 @@ import {
 } from './existingSubtitleUtils'
 import {
   clearProjectDraft,
+  createDefaultExistingSubtitles,
+  DEFAULT_PROJECT_STYLE,
+  DEFAULT_PROJECT_TOPIC,
+  DEFAULT_PROJECT_VISUAL_STYLE,
   DRAFT_VERSION,
   loadProjectDraft,
   saveProjectDraft,
@@ -299,11 +303,11 @@ export const App: React.FC = () => {
   const [themeMode, setThemeMode] = useState<ThemeMode>(readStoredTheme)
   const [creationMode, setCreationMode] = useState<CreationMode>('ai')
   const [videoType, setVideoType] = useState<VideoType>('normal')
-  const [topic, setTopic] = useState('What is baptism in Christianity?')
-  const [style, setStyle] = useState('neutral explainer, gentle and respectful tone')
+  const [topic, setTopic] = useState(DEFAULT_PROJECT_TOPIC)
+  const [style, setStyle] = useState(DEFAULT_PROJECT_STYLE)
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>('16:9')
   const [duration, setDuration] = useState(180)
-  const [visualStyle, setVisualStyle] = useState<VisualStyle>('Classical sacred art')
+  const [visualStyle, setVisualStyle] = useState<VisualStyle>(DEFAULT_PROJECT_VISUAL_STYLE as VisualStyle)
   const [imageFitMode, setImageFitMode] = useState<ImageFitMode>('fit')
   const [backgroundMusic, setBackgroundMusic] = useState<BackgroundMusic>('none')
   const [backgroundMusicVolume, setBackgroundMusicVolume] = useState(0.12)
@@ -340,14 +344,9 @@ export const App: React.FC = () => {
   const [existingSourceVideoUrl, setExistingSourceVideoUrl] = useState('')
   const [existingVideoCurrentTime, setExistingVideoCurrentTime] = useState(0)
   const [activeExistingSubtitlePreviewId, setActiveExistingSubtitlePreviewId] = useState<string | null>(null)
-  const [existingSubtitles, setExistingSubtitles] = useState<ExistingSubtitleItem[]>([
-    {
-      id: 'subtitle-1',
-      start_seconds: 0,
-      end_seconds: DEFAULT_EXISTING_SUBTITLE_DURATION_SEC,
-      text: "Welcome to today's lesson.",
-    },
-  ])
+  const [existingSubtitles, setExistingSubtitles] = useState<ExistingSubtitleItem[]>(
+    createDefaultExistingSubtitles,
+  )
   const [existingVideoLayout, setExistingVideoLayout] = useState<ExistingVideoLayout>(EMPTY_VIDEO_LAYOUT)
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
@@ -388,9 +387,12 @@ export const App: React.FC = () => {
   const [activeRenderJobId, setActiveRenderJobId] = useState<string | null>(null)
   const [renderReconnectNotice, setRenderReconnectNotice] = useState<string | null>(null)
   const [projectSavedAt, setProjectSavedAt] = useState<string | null>(null)
+  const [projectResetNotice, setProjectResetNotice] = useState<string | null>(null)
   const jobPollStopRef = useRef<(() => void) | null>(null)
   const draftHydratedRef = useRef(false)
   const autosaveTimerRef = useRef<number | undefined>(undefined)
+  const suppressAutosaveRef = useRef(false)
+  const projectResetNoticeTimerRef = useRef<number | undefined>(undefined)
   const totalSceneDuration = editedScenes.reduce((acc, s) => acc + (Number.isFinite(s.duration_seconds) ? s.duration_seconds : 0), 0)
   const durationDiff = Math.abs(totalSceneDuration - duration)
   const hasDurationWarning = durationDiff > 10
@@ -1099,13 +1101,115 @@ export const App: React.FC = () => {
     setGenerationProgress(0)
   }
 
-  const handleClearSavedProject = () => {
-    if (!window.confirm('Clear the saved local project draft?')) return
-    stopJobPolling()
-    clearProjectDraft()
-    setProjectSavedAt(null)
+  const applyDefaultProjectState = () => {
+    stopManualSceneAudioPreview()
+    stopExistingSubtitlePreview()
+
+    setCreationMode('ai')
+    setVideoType('normal')
+    setTopic(DEFAULT_PROJECT_TOPIC)
+    setStyle(DEFAULT_PROJECT_STYLE)
+    setAspectRatio('16:9')
+    setDuration(180)
+    setVisualStyle(DEFAULT_PROJECT_VISUAL_STYLE as VisualStyle)
+    setImageFitMode('fit')
+    setBackgroundMusic('none')
+    setBackgroundMusicVolume(0.12)
+    setMotionEffect('gentle_zoom')
+    setMotionIntensity('subtle')
+    setSubtitleStyle('off')
+
+    setBrandingEnabled(false)
+    setBrandingLogoPath('')
+    setBrandingLogoUrl('')
+    setBrandingLogoPreviewUrl(prev => {
+      if (prev.startsWith('blob:')) URL.revokeObjectURL(prev)
+      return ''
+    })
+    setBrandingPosition('bottom_right')
+    setBrandingSize('medium')
+    setBrandingOpacity(0.8)
+    setBrandingUploading(false)
+
+    setEditedScript('')
+    setEditedScenes([])
+    setManualUploads({})
+    setManualImageModes({})
+    setManualNarrationSource('tts')
+    setManualAudioUpload(undefined)
+    setPersistedManualNarration(null)
+    clearReplacementUploadState()
+    clearScenePreviews()
+    setScenePreviewNonce(0)
+
+    setUploadedVideoFile(undefined)
+    setUploadedVideoUrl('')
+    setExistingSourceVideoPath('')
+    setExistingSourceVideoUrl('')
+    setExistingVideoCurrentTime(0)
+    setActiveExistingSubtitlePreviewId(null)
+    setExistingVideoLayout(EMPTY_VIDEO_LAYOUT)
+    setExistingSubtitles(createDefaultExistingSubtitles())
+
+    setUploadedAudioUrl('')
+    setUploadedAudioDuration(0)
+    setUploadedAudioCurrentTime(0)
+    setSceneCutTimes([])
+    setActiveAudioSceneIndex(null)
+    setSceneAudioPreviewPlaying(false)
+
+    setResult(null)
+    setEditMode(false)
+    setVideoVersion(0)
+    setCopying(false)
+    setCopyLabel('Copy script')
+
+    setYoutubeTitle('')
+    setYoutubeDescription('')
+    setYoutubeSuccessUrl(null)
+    setYoutubeError(null)
+
+    setLoading(false)
+    setError(null)
+    setGenerationStage('Idle')
+    setGenerationProgress(0)
+    setGenerationProfile('ai')
     setActiveRenderJobId(null)
     setRenderReconnectNotice(null)
+  }
+
+  const handleClearSavedProject = () => {
+    if (
+      !window.confirm(
+        'Clear the saved project and reset all project data and settings? This cannot be undone.',
+      )
+    ) {
+      return
+    }
+
+    suppressAutosaveRef.current = true
+    if (autosaveTimerRef.current !== undefined) {
+      window.clearTimeout(autosaveTimerRef.current)
+      autosaveTimerRef.current = undefined
+    }
+    if (projectResetNoticeTimerRef.current !== undefined) {
+      window.clearTimeout(projectResetNoticeTimerRef.current)
+    }
+
+    stopJobPolling()
+    clearProjectDraft()
+    applyDefaultProjectState()
+    setProjectSavedAt(null)
+
+    setProjectResetNotice('Saved project cleared. SacredClips has been reset to its default state.')
+    projectResetNoticeTimerRef.current = window.setTimeout(() => {
+      setProjectResetNotice(null)
+      projectResetNoticeTimerRef.current = undefined
+    }, 6000)
+
+    window.setTimeout(() => {
+      suppressAutosaveRef.current = false
+    }, 0)
   }
 
   const startRenderJobRequest = async (
@@ -1858,7 +1962,7 @@ export const App: React.FC = () => {
   }, [])
 
   useEffect(() => {
-    if (!draftHydratedRef.current) return
+    if (!draftHydratedRef.current || suppressAutosaveRef.current) return
     if (autosaveTimerRef.current !== undefined) {
       window.clearTimeout(autosaveTimerRef.current)
     }
@@ -2212,6 +2316,12 @@ export const App: React.FC = () => {
         {renderReconnectNotice ? (
           <div className="reconnect-notice" role="status">
             {renderReconnectNotice}
+          </div>
+        ) : null}
+
+        {projectResetNotice ? (
+          <div className="reconnect-notice project-reset-notice" role="status">
+            {projectResetNotice}
           </div>
         ) : null}
 
