@@ -37,7 +37,7 @@ from .schemas import (
     YouTubePublishRequest,
     YouTubePublishResponse,
 )
-from .services import image_service, render_job_service, script_service, tts_service, video_service, youtube_service
+from .services import image_service, output_path_service, render_job_service, script_service, tts_service, video_service, youtube_service
 
 ProgressFn = Callable[[str, float], None]
 
@@ -365,11 +365,15 @@ def _safe_resolved_file_under_dir(expected_parent: Path, candidate: str | None) 
     if not candidate or not isinstance(candidate, str):
         return None
     try:
-        p = Path(candidate).expanduser().resolve()
+        raw = Path(candidate).expanduser()
+        if raw.is_absolute():
+            resolved = raw.resolve()
+        else:
+            resolved = output_path_service.from_output_relative(candidate)
         parent = expected_parent.resolve()
-        p.relative_to(parent)
-        if p.is_file() and p.stat().st_size > 0:
-            return p
+        resolved.relative_to(parent)
+        if resolved.is_file() and resolved.stat().st_size > 0:
+            return resolved
     except Exception:
         return None
     return None

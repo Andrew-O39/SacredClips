@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
 from .. import config
+from . import output_path_service
 
 ProgressCallback = Callable[[str, float], None]
 
@@ -33,6 +34,21 @@ JOBS_FILE = Path(config.BASE_OUTPUT_DIR).resolve() / "render_jobs.json"
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _migrate_job_record(rec: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Normalize persisted result paths to BASE_OUTPUT_DIR-relative form."""
+    out = dict(rec)
+    changed = False
+    result = out.get("result")
+    if result is not None:
+        normalized, result_changed = output_path_service.normalize_result_for_persist(
+            result,
+            strict=False,
+        )
+        out["result"] = normalized
+        changed = result_changed
+    return out, changed
 
 
 def _load_jobs_from_disk() -> None:
@@ -58,6 +74,7 @@ def _load_jobs_from_disk() -> None:
                     "error": "Backend restarted while this job was in progress.",
                     "updated_at": _utc_now(),
                 }
+            rec, _path_migrated = _migrate_job_record(rec)
             restored[str(job_id)] = rec
         _jobs = restored
     except Exception:
@@ -120,6 +137,7 @@ def update_progress(job_id: str, stage: str, progress: float) -> None:
 
 
 def complete_job(job_id: str, result: Any) -> None:
+    normalized, _ = output_path_service.normalize_result_for_persist(result, strict=True)
     with _lock:
         _update_job_unlocked(
             job_id,
@@ -127,7 +145,7 @@ def complete_job(job_id: str, result: Any) -> None:
             stage="completed",
             progress=100.0,
             error=None,
-            result=result,
+            result=normalized,
         )
     _persist_jobs()
 
@@ -146,14 +164,19 @@ def fail_job(job_id: str, error: str) -> None:
 def get_job(job_id: str) -> Optional[dict[str, Any]]:
     with _lock:
         rec = _jobs.get(job_id)
-        return dict(rec) if rec else None
+        if not rec:
+            return None
+        return output_path_service.expand_job_for_api(dict(rec))
 
 
 def list_latest_jobs(limit: int = 20) -> list[dict[str, Any]]:
     with _lock:
         items = list(_jobs.values())
     items.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
-    return [dict(r) for r in items[: max(1, limit)]]
+    return [
+        output_path_service.expand_job_for_api(dict(r))
+        for r in items[: max(1, limit)]
+    ]
 
 
 def submit_job(job_id: str, fn: Callable[[ProgressCallback], Any]) -> None:
