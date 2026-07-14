@@ -117,6 +117,31 @@ class RenderSubtitlesVideoResponse(BaseModel):
     source_video_url: Optional[str] = None
 
 
+RenderJobStatusLiteral = Literal["queued", "running", "completed", "failed"]
+RenderJobTypeLiteral = Literal["ai_generate", "manual_video", "render_subtitles", "regenerate"]
+
+
+class RenderJobStartResponse(BaseModel):
+    job_id: str
+    status: RenderJobStatusLiteral = "queued"
+
+
+class RenderJobStatus(BaseModel):
+    job_id: str
+    job_type: RenderJobTypeLiteral
+    status: RenderJobStatusLiteral
+    stage: str
+    progress: float = 0.0
+    error: Optional[str] = None
+    result: Optional[dict] = None
+    created_at: str
+    updated_at: str
+
+
+class RenderJobListResponse(BaseModel):
+    jobs: List[RenderJobStatus]
+
+
 class PreviewSceneRequest(BaseModel):
     """Single-scene preview render (uses edited scene list + narration timeline)."""
 

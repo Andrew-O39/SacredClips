@@ -22,5 +22,5 @@ frontend/.vite/
 .env
 *.env
 
-# Generated media files
+# Generated media and local render-job state
 outputs/

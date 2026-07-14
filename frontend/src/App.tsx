@@ -1,4 +1,22 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react'
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
+import { ExistingVideoSubtitleOverlay } from './ExistingVideoSubtitleOverlay'
+import {
+  DEFAULT_EXISTING_SUBTITLE_DURATION_SEC,
+  EMPTY_VIDEO_LAYOUT,
+  type ExistingVideoLayout,
+  getRecommendedSubtitleMaxChars,
+  inferExistingVideoPortrait,
+  isExistingSubtitleStyle,
+  wrapSubtitlePreviewLines,
+} from './existingSubtitleUtils'
+import {
+  clearProjectDraft,
+  DRAFT_VERSION,
+  loadProjectDraft,
+  saveProjectDraft,
+  type ProjectDraft,
+} from './projectDraft'
+import { fetchRenderJob, formatJobStage, pollRenderJob, type RenderJobStatus } from './renderJobs'
 
 const API_BASE_URL = 'http://localhost:8000'
 
@@ -323,8 +341,14 @@ export const App: React.FC = () => {
   const [existingVideoCurrentTime, setExistingVideoCurrentTime] = useState(0)
   const [activeExistingSubtitlePreviewId, setActiveExistingSubtitlePreviewId] = useState<string | null>(null)
   const [existingSubtitles, setExistingSubtitles] = useState<ExistingSubtitleItem[]>([
-    { id: 'subtitle-1', start_seconds: 0, end_seconds: 4.5, text: "Welcome to today's lesson." },
+    {
+      id: 'subtitle-1',
+      start_seconds: 0,
+      end_seconds: DEFAULT_EXISTING_SUBTITLE_DURATION_SEC,
+      text: "Welcome to today's lesson.",
+    },
   ])
+  const [existingVideoLayout, setExistingVideoLayout] = useState<ExistingVideoLayout>(EMPTY_VIDEO_LAYOUT)
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const existingVideoPreviewRef = useRef<HTMLVideoElement | null>(null)
@@ -361,6 +385,12 @@ export const App: React.FC = () => {
   const [generationStage, setGenerationStage] = useState('Idle')
   const [generationProgress, setGenerationProgress] = useState(0)
   const [generationProfile, setGenerationProfile] = useState<GenerationProfile>('ai')
+  const [activeRenderJobId, setActiveRenderJobId] = useState<string | null>(null)
+  const [renderReconnectNotice, setRenderReconnectNotice] = useState<string | null>(null)
+  const [projectSavedAt, setProjectSavedAt] = useState<string | null>(null)
+  const jobPollStopRef = useRef<(() => void) | null>(null)
+  const draftHydratedRef = useRef(false)
+  const autosaveTimerRef = useRef<number | undefined>(undefined)
   const totalSceneDuration = editedScenes.reduce((acc, s) => acc + (Number.isFinite(s.duration_seconds) ? s.duration_seconds : 0), 0)
   const durationDiff = Math.abs(totalSceneDuration - duration)
   const hasDurationWarning = durationDiff > 10
@@ -391,6 +421,36 @@ export const App: React.FC = () => {
   )
 
   const existingVideoPreviewSrc = uploadedVideoUrl || (existingSourceVideoUrl ? `${API_BASE_URL}${existingSourceVideoUrl}` : '')
+
+  const existingVideoPortrait = useMemo(
+    () =>
+      inferExistingVideoPortrait(
+        existingVideoLayout.intrinsicW,
+        existingVideoLayout.intrinsicH,
+        subtitleStyle,
+      ),
+    [existingVideoLayout.intrinsicW, existingVideoLayout.intrinsicH, subtitleStyle],
+  )
+
+  useEffect(() => {
+    if (!existingVideoPreviewSrc) {
+      setExistingVideoLayout(EMPTY_VIDEO_LAYOUT)
+      return
+    }
+    const video = existingVideoPreviewRef.current
+    if (!video) return
+
+    const onLayoutChange = () => syncExistingVideoLayout(video)
+    const observer = new ResizeObserver(onLayoutChange)
+    observer.observe(video)
+    window.addEventListener('resize', onLayoutChange)
+    onLayoutChange()
+
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', onLayoutChange)
+    }
+  }, [existingVideoPreviewSrc, videoVersion])
 
   const durationMin = videoType === 'normal' ? 120 : 60
   const durationMax = videoType === 'normal' ? 600 : 90
@@ -541,7 +601,19 @@ export const App: React.FC = () => {
     setActiveExistingSubtitlePreviewId(null)
   }
 
+  function syncExistingVideoLayout(el?: HTMLVideoElement | null) {
+    const video = el ?? existingVideoPreviewRef.current
+    if (!video) return
+    setExistingVideoLayout({
+      intrinsicW: video.videoWidth || 0,
+      intrinsicH: video.videoHeight || 0,
+      displayW: video.clientWidth || 0,
+      displayH: video.clientHeight || 0,
+    })
+  }
+
   function syncExistingVideoPreviewTime(el: HTMLVideoElement) {
+    syncExistingVideoLayout(el)
     setExistingVideoCurrentTime(el.currentTime)
     const end = existingSubtitlePreviewEndRef.current
     if (end != null && el.currentTime >= end - 0.04) {
@@ -585,6 +657,7 @@ export const App: React.FC = () => {
     setGenerationProfile(profile)
     setGenerationStage('Preparing request')
     setGenerationProgress(5)
+    setRenderReconnectNotice(null)
   }
 
   const finishGenerationProgress = async () => {
@@ -592,6 +665,277 @@ export const App: React.FC = () => {
     setGenerationProgress(100)
     await new Promise(resolve => setTimeout(resolve, 250))
   }
+
+  const stopJobPolling = () => {
+    jobPollStopRef.current?.()
+    jobPollStopRef.current = null
+  }
+
+  const collectProjectDraft = useCallback((): ProjectDraft => {
+    return {
+      version: DRAFT_VERSION,
+      savedAt: new Date().toISOString(),
+      creationMode,
+      topic,
+      style,
+      videoType,
+      duration,
+      aspectRatio,
+      imageFitMode,
+      visualStyle,
+      editedScript,
+      editedScenes,
+      manualImageModes,
+      manualNarrationSource,
+      persistedManualNarration,
+      existingSubtitles,
+      existingSourceVideoPath,
+      existingSourceVideoUrl,
+      backgroundMusic,
+      backgroundMusicVolume,
+      motionEffect,
+      motionIntensity,
+      subtitleStyle,
+      brandingEnabled,
+      brandingLogoPath,
+      brandingLogoUrl,
+      brandingPosition,
+      brandingSize,
+      brandingOpacity,
+      activeRenderJobId,
+      latestResult: result
+        ? {
+            video_path: result.video_path,
+            video_url: result.video_url,
+            script_text: result.script_text,
+            scenes: result.scenes,
+            used_ai: result.used_ai,
+            narration_source: result.narration_source ?? null,
+            narration_audio_path: result.narration_audio_path ?? null,
+          }
+        : null,
+      editMode,
+    }
+  }, [
+    creationMode,
+    topic,
+    style,
+    videoType,
+    duration,
+    aspectRatio,
+    imageFitMode,
+    visualStyle,
+    editedScript,
+    editedScenes,
+    manualImageModes,
+    manualNarrationSource,
+    persistedManualNarration,
+    existingSubtitles,
+    existingSourceVideoPath,
+    existingSourceVideoUrl,
+    backgroundMusic,
+    backgroundMusicVolume,
+    motionEffect,
+    motionIntensity,
+    subtitleStyle,
+    brandingEnabled,
+    brandingLogoPath,
+    brandingLogoUrl,
+    brandingPosition,
+    brandingSize,
+    brandingOpacity,
+    activeRenderJobId,
+    result,
+    editMode,
+  ])
+
+  const persistProjectDraft = useCallback(
+    (patch?: Partial<ProjectDraft>) => {
+      const draft = { ...collectProjectDraft(), ...patch, savedAt: new Date().toISOString() }
+      if (saveProjectDraft(draft)) {
+        setProjectSavedAt(draft.savedAt)
+      }
+    },
+    [collectProjectDraft],
+  )
+
+  const applyVideoResponse = useCallback(
+    (data: VideoResponse, options?: { clearManualUploads?: boolean }) => {
+      setResult(data)
+      setEditedScript(data.script_text)
+      setEditedScenes(data.scenes)
+      setVideoVersion(prev => prev + 1)
+      setYoutubeTitle(topic)
+      setYoutubeDescription(data.script_text)
+      setYoutubeSuccessUrl(null)
+      if (options?.clearManualUploads !== false) {
+        setManualUploads({})
+        setManualImageModes({})
+        setManualAudioUpload(undefined)
+      }
+      setPersistedManualNarration(
+        data.narration_source === 'upload' && data.narration_audio_path
+          ? { source: 'upload', path: data.narration_audio_path }
+          : null,
+      )
+      persistProjectDraft({
+        latestResult: {
+          video_path: data.video_path,
+          video_url: data.video_url,
+          script_text: data.script_text,
+          scenes: data.scenes,
+          used_ai: data.used_ai,
+          narration_source: data.narration_source ?? null,
+          narration_audio_path: data.narration_audio_path ?? null,
+        },
+        activeRenderJobId: null,
+      })
+    },
+    [persistProjectDraft, topic],
+  )
+
+  const applySubtitlesResponse = useCallback(
+    (data: RenderSubtitlesVideoResponse, scriptText: string) => {
+      setExistingSourceVideoPath(data.source_video_path || existingSourceVideoPath)
+      setExistingSourceVideoUrl(data.source_video_url || existingSourceVideoUrl)
+      const nextResult: VideoResponse = {
+        video_path: data.video_path,
+        video_url: data.video_url,
+        script_text: scriptText || 'Existing video with subtitles.',
+        scenes: [],
+        used_ai: false,
+        narration_source: null,
+        narration_audio_path: null,
+      }
+      setResult(nextResult)
+      setVideoVersion(prev => prev + 1)
+      setYoutubeTitle(topic)
+      setYoutubeDescription(scriptText)
+      persistProjectDraft({
+        existingSourceVideoPath: data.source_video_path || existingSourceVideoPath,
+        existingSourceVideoUrl: data.source_video_url || existingSourceVideoUrl,
+        latestResult: {
+          video_path: nextResult.video_path,
+          video_url: nextResult.video_url,
+          script_text: nextResult.script_text,
+          scenes: [],
+          used_ai: false,
+          narration_source: null,
+          narration_audio_path: null,
+        },
+        activeRenderJobId: null,
+      })
+    },
+    [existingSourceVideoPath, existingSourceVideoUrl, persistProjectDraft, topic],
+  )
+
+  const handleRenderJobUpdate = useCallback((job: RenderJobStatus) => {
+    setGenerationStage(formatJobStage(job.stage))
+    setGenerationProgress(job.progress)
+  }, [])
+
+  const startRenderJobPolling = useCallback(
+    (
+      jobId: string,
+      profile: GenerationProfile,
+      onSuccess: (result: Record<string, unknown>) => void | Promise<void>,
+    ) => {
+      stopJobPolling()
+      setGenerationProfile(profile)
+      setActiveRenderJobId(jobId)
+      setLoading(true)
+      persistProjectDraft({ activeRenderJobId: jobId })
+
+      jobPollStopRef.current = pollRenderJob(API_BASE_URL, jobId, {
+        onUpdate: handleRenderJobUpdate,
+        onComplete: async job => {
+          stopJobPolling()
+          setActiveRenderJobId(null)
+          await finishGenerationProgress()
+          if (job.result) {
+            await onSuccess(job.result)
+          }
+          setLoading(false)
+        },
+        onFailed: job => {
+          stopJobPolling()
+          setActiveRenderJobId(null)
+          setError(job.error || 'Render failed')
+          persistProjectDraft({ activeRenderJobId: null })
+          setLoading(false)
+        },
+        onError: err => {
+          console.warn('Job poll error (will retry):', err.message)
+        },
+      })
+    },
+    [handleRenderJobUpdate, persistProjectDraft],
+  )
+
+  const resumeRenderJobIfNeeded = useCallback(
+    async (jobId: string, showNotice = false) => {
+      try {
+        const job = await fetchRenderJob(API_BASE_URL, jobId)
+        handleRenderJobUpdate(job)
+        if (job.status === 'completed' && job.result) {
+          stopJobPolling()
+          setActiveRenderJobId(null)
+          setLoading(false)
+          if (job.job_type === 'render_subtitles') {
+            const scriptText = existingSubtitles.map(s => s.text.trim()).filter(Boolean).join('\n')
+            applySubtitlesResponse(job.result as unknown as RenderSubtitlesVideoResponse, scriptText)
+          } else {
+            applyVideoResponse(job.result as unknown as VideoResponse, { clearManualUploads: false })
+          }
+          if (showNotice) {
+            setRenderReconnectNotice('Render completed while you were away. Result restored.')
+          }
+          return
+        }
+        if (job.status === 'failed') {
+          stopJobPolling()
+          setActiveRenderJobId(null)
+          setLoading(false)
+          setError(job.error || 'Render failed')
+          return
+        }
+        if (job.status === 'queued' || job.status === 'running') {
+          setLoading(true)
+          if (showNotice) {
+            setRenderReconnectNotice('Render still running on the backend. Reconnected successfully.')
+          }
+          if (jobPollStopRef.current) {
+            return
+          }
+          const profile: GenerationProfile =
+            job.job_type === 'render_subtitles'
+              ? 'subtitles'
+              : job.job_type === 'manual_video'
+                ? 'manual_tts'
+                : job.job_type === 'regenerate'
+                  ? 'regenerate'
+                  : 'ai'
+          startRenderJobPolling(jobId, profile, async result => {
+            if (job.job_type === 'render_subtitles') {
+              const scriptText = existingSubtitles.map(s => s.text.trim()).filter(Boolean).join('\n')
+              applySubtitlesResponse(result as unknown as RenderSubtitlesVideoResponse, scriptText)
+            } else {
+              applyVideoResponse(result as unknown as VideoResponse, { clearManualUploads: false })
+            }
+          })
+        }
+      } catch (err: unknown) {
+        console.warn('Could not resume render job', err)
+      }
+    },
+    [
+      applySubtitlesResponse,
+      applyVideoResponse,
+      existingSubtitles,
+      handleRenderJobUpdate,
+      startRenderJobPolling,
+    ],
+  )
 
   const clearReplacementUploadState = () => {
     setReplacementPreviewUrls(prev => {
@@ -637,7 +981,7 @@ export const App: React.FC = () => {
         {
           id: `subtitle-${Date.now()}`,
           start_seconds: start,
-          end_seconds: start + 4,
+          end_seconds: start + DEFAULT_EXISTING_SUBTITLE_DURATION_SEC,
           text: 'New subtitle',
         },
       ]
@@ -674,6 +1018,7 @@ export const App: React.FC = () => {
     setExistingSourceVideoPath('')
     setExistingSourceVideoUrl('')
     setExistingVideoCurrentTime(0)
+    setExistingVideoLayout(EMPTY_VIDEO_LAYOUT)
     clearExistingVideoResult()
   }
 
@@ -706,6 +1051,18 @@ export const App: React.FC = () => {
   }
 
   const resetToNewVideo = () => {
+    if (
+      !window.confirm(
+        'Start a new video? This clears your saved local project draft and any in-progress render tracking.',
+      )
+    ) {
+      return
+    }
+    stopJobPolling()
+    clearProjectDraft()
+    setProjectSavedAt(null)
+    setActiveRenderJobId(null)
+    setRenderReconnectNotice(null)
     stopManualSceneAudioPreview()
     stopExistingSubtitlePreview()
     setResult(null)
@@ -720,8 +1077,14 @@ export const App: React.FC = () => {
     setExistingSourceVideoUrl('')
     setExistingVideoCurrentTime(0)
     setActiveExistingSubtitlePreviewId(null)
+    setExistingVideoLayout(EMPTY_VIDEO_LAYOUT)
     setExistingSubtitles([
-      { id: 'subtitle-1', start_seconds: 0, end_seconds: 4.5, text: "Welcome to today's lesson." },
+      {
+        id: 'subtitle-1',
+        start_seconds: 0,
+        end_seconds: DEFAULT_EXISTING_SUBTITLE_DURATION_SEC,
+        text: "Welcome to today's lesson.",
+      },
     ])
     setPersistedManualNarration(null)
     clearReplacementUploadState()
@@ -736,6 +1099,30 @@ export const App: React.FC = () => {
     setGenerationProgress(0)
   }
 
+  const handleClearSavedProject = () => {
+    if (!window.confirm('Clear the saved local project draft?')) return
+    stopJobPolling()
+    clearProjectDraft()
+    setProjectSavedAt(null)
+    setActiveRenderJobId(null)
+    setRenderReconnectNotice(null)
+  }
+
+  const startRenderJobRequest = async (
+    endpoint: string,
+    init: RequestInit,
+    profile: GenerationProfile,
+    onSuccess: (result: Record<string, unknown>) => void | Promise<void>,
+  ) => {
+    const res = await fetch(`${API_BASE_URL}${endpoint}`, init)
+    if (!res.ok) {
+      const text = await res.text()
+      throw new Error(text || 'Failed to start render job')
+    }
+    const data = (await res.json()) as { job_id: string }
+    startRenderJobPolling(data.job_id, profile, onSuccess)
+  }
+
   const handleAiGenerate = async () => {
     beginGenerationProgress('ai')
     setError(null)
@@ -747,47 +1134,36 @@ export const App: React.FC = () => {
     setYoutubeError(null)
     setYoutubeSuccessUrl(null)
     try {
-      const res = await fetch(`${API_BASE_URL}/generate-video`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          topic,
-          style,
-          duration_seconds: duration,
-          visual_style: visualStyle,
-          aspect_ratio: aspectRatio,
-          image_fit_mode: imageFitMode,
-          background_music: backgroundMusic,
-          background_music_volume: backgroundMusicVolume,
-          motion_effect: motionEffect,
-          motion_intensity: motionIntensity,
-          subtitle_style: subtitleStyle,
-          ...brandingApiFields(),
-        }),
-      })
-
-      if (!res.ok) {
-        const text = await res.text()
-        throw new Error(text || 'Request failed')
-      }
-
-      const data: VideoResponse = await res.json()
-      await finishGenerationProgress()
-      setResult(data)
-      setEditedScript(data.script_text)
-      setEditedScenes(data.scenes)
-      setVideoVersion(prev => prev + 1) // new video
-      setYoutubeTitle(topic)
-      setYoutubeDescription(data.script_text)
-      setYoutubeSuccessUrl(null)
-      setManualUploads({})
-      setManualImageModes({})
-      setPersistedManualNarration(null)
-      clearScenePreviews()
+      await startRenderJobRequest(
+        '/jobs/generate-video',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            topic,
+            style,
+            duration_seconds: duration,
+            visual_style: visualStyle,
+            aspect_ratio: aspectRatio,
+            image_fit_mode: imageFitMode,
+            background_music: backgroundMusic,
+            background_music_volume: backgroundMusicVolume,
+            motion_effect: motionEffect,
+            motion_intensity: motionIntensity,
+            subtitle_style: subtitleStyle,
+            ...brandingApiFields(),
+          }),
+        },
+        'ai',
+        async result => {
+          applyVideoResponse(result as unknown as VideoResponse)
+          setEditMode(false)
+          clearScenePreviews()
+        },
+      )
     } catch (err: any) {
       console.error(err)
       setError(err.message || 'Something went wrong')
-    } finally {
       setLoading(false)
     }
   }
@@ -853,39 +1229,19 @@ export const App: React.FC = () => {
         }
       }
 
-      const res = await fetch(`${API_BASE_URL}/manual-video`, {
-        method: 'POST',
-        body: fd,
-      })
-
-      if (!res.ok) {
-        const text = await res.text()
-        throw new Error(text || 'Manual video request failed')
-      }
-
-      const data: VideoResponse = await res.json()
-      await finishGenerationProgress()
-      setResult(data)
-      setEditedScript(data.script_text)
-      setEditedScenes(data.scenes)
-      setEditMode(false)
-      setVideoVersion(prev => prev + 1)
-      setYoutubeTitle(topic)
-      setYoutubeDescription(data.script_text)
-      setYoutubeSuccessUrl(null)
-      setManualUploads({})
-      setManualImageModes({})
-      setManualAudioUpload(undefined)
-      setPersistedManualNarration(
-        data.narration_source === 'upload' && data.narration_audio_path
-          ? { source: 'upload', path: data.narration_audio_path }
-          : null,
+      await startRenderJobRequest(
+        '/jobs/manual-video',
+        { method: 'POST', body: fd },
+        manualNarrationSource === 'upload' ? 'manual_upload' : 'manual_tts',
+        async result => {
+          applyVideoResponse(result as unknown as VideoResponse)
+          setEditMode(false)
+          clearScenePreviews()
+        },
       )
-      clearScenePreviews()
     } catch (err: any) {
       console.error(err)
       setError(err.message || 'Something went wrong')
-    } finally {
       setLoading(false)
     }
   }
@@ -926,35 +1282,18 @@ export const App: React.FC = () => {
         fd.append('video_upload', uploadedVideoFile)
       }
 
-      const res = await fetch(`${API_BASE_URL}/render-subtitles-video`, {
-        method: 'POST',
-        body: fd,
-      })
-      if (!res.ok) {
-        const text = await res.text()
-        throw new Error(text || 'Subtitle render failed')
-      }
-      const data: RenderSubtitlesVideoResponse = await res.json()
-      await finishGenerationProgress()
       const scriptText = cleanSubtitles.map(s => s.text).join('\n')
-      setExistingSourceVideoPath(data.source_video_path || existingSourceVideoPath)
-      setExistingSourceVideoUrl(data.source_video_url || existingSourceVideoUrl)
-      setResult({
-        video_path: data.video_path,
-        video_url: data.video_url,
-        script_text: scriptText || 'Existing video with subtitles.',
-        scenes: [],
-        used_ai: false,
-        narration_source: null,
-        narration_audio_path: null,
-      })
-      setVideoVersion(prev => prev + 1)
-      setYoutubeTitle(topic)
-      setYoutubeDescription(scriptText)
+      await startRenderJobRequest(
+        '/jobs/render-subtitles-video',
+        { method: 'POST', body: fd },
+        'subtitles',
+        async result => {
+          applySubtitlesResponse(result as unknown as RenderSubtitlesVideoResponse, scriptText)
+        },
+      )
     } catch (err: any) {
       console.error(err)
       setError(err.message || 'Subtitle render failed')
-    } finally {
       setLoading(false)
     }
   }
@@ -985,23 +1324,9 @@ export const App: React.FC = () => {
       const hasReplacementFiles =
         !result.used_ai && editedScenes.some(s => Boolean(replacementUploads[s.index]))
 
-      const applyRebuildSuccess = async (data: VideoResponse) => {
-        await finishGenerationProgress()
-        setResult(data)
+      const onRebuildSuccess = async (data: VideoResponse) => {
+        applyVideoResponse(data, { clearManualUploads: true })
         setEditMode(false)
-        setEditedScript(data.script_text)
-        setEditedScenes(data.scenes)
-        setVideoVersion(prev => prev + 1) // new video, force reload
-        setYoutubeTitle(topic)
-        setYoutubeDescription(data.script_text)
-        setYoutubeSuccessUrl(null)
-        setManualUploads({})
-        setManualImageModes({})
-        setPersistedManualNarration(
-          data.narration_source === 'upload' && data.narration_audio_path
-            ? { source: 'upload', path: data.narration_audio_path }
-            : null,
-        )
         clearReplacementUploadState()
         clearScenePreviews()
       }
@@ -1043,18 +1368,14 @@ export const App: React.FC = () => {
           }
         }
 
-        const res = await fetch(`${API_BASE_URL}/manual-video`, {
-          method: 'POST',
-          body: fd,
-        })
-
-        if (!res.ok) {
-          const text = await res.text()
-          throw new Error(text || 'Manual video request failed')
-        }
-
-        const data: VideoResponse = await res.json()
-        await applyRebuildSuccess(data)
+        await startRenderJobRequest(
+          '/jobs/manual-video',
+          { method: 'POST', body: fd },
+          'regenerate',
+          async result => {
+            await onRebuildSuccess(result as unknown as VideoResponse)
+          },
+        )
       } else {
         const narrationPayload: Record<string, string> = {}
         if (!result.used_ai) {
@@ -1066,40 +1387,38 @@ export const App: React.FC = () => {
           }
         }
 
-        const res = await fetch(`${API_BASE_URL}/generate-video-from-scenes`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            topic,
-            style,
-            duration_seconds: duration,
-            script_text: timelineScript,
-            scenes: scenesForApiPayload(editedScenes),
-            visual_style: visualStyle,
-            aspect_ratio: aspectRatio,
-            image_fit_mode: imageFitMode,
-            background_music: backgroundMusic,
-            background_music_volume: backgroundMusicVolume,
-            motion_effect: motionEffect,
-            motion_intensity: motionIntensity,
-            subtitle_style: subtitleStyle,
-            ...narrationPayload,
-            ...brandingApiFields(),
-          }),
-        })
-
-        if (!res.ok) {
-          const text = await res.text()
-          throw new Error(text || 'Request failed')
-        }
-
-        const data: VideoResponse = await res.json()
-        await applyRebuildSuccess(data)
+        await startRenderJobRequest(
+          '/jobs/regenerate-video',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              topic,
+              style,
+              duration_seconds: duration,
+              script_text: timelineScript,
+              scenes: scenesForApiPayload(editedScenes),
+              visual_style: visualStyle,
+              aspect_ratio: aspectRatio,
+              image_fit_mode: imageFitMode,
+              background_music: backgroundMusic,
+              background_music_volume: backgroundMusicVolume,
+              motion_effect: motionEffect,
+              motion_intensity: motionIntensity,
+              subtitle_style: subtitleStyle,
+              ...narrationPayload,
+              ...brandingApiFields(),
+            }),
+          },
+          'regenerate',
+          async result => {
+            await onRebuildSuccess(result as unknown as VideoResponse)
+          },
+        )
       }
     } catch (err: any) {
       console.error(err)
       setError(err.message || 'Something went wrong')
-    } finally {
       setLoading(false)
     }
   }
@@ -1490,6 +1809,120 @@ export const App: React.FC = () => {
   }, [themeMode])
 
   useEffect(() => {
+    const draft = loadProjectDraft()
+    if (!draft) {
+      draftHydratedRef.current = true
+      return
+    }
+    setCreationMode(draft.creationMode)
+    setTopic(draft.topic)
+    setStyle(draft.style)
+    setVideoType(draft.videoType)
+    setDuration(draft.duration)
+    setAspectRatio(draft.aspectRatio)
+    setImageFitMode(draft.imageFitMode)
+    if ((VISUAL_STYLE_OPTIONS as readonly string[]).includes(draft.visualStyle)) {
+      setVisualStyle(draft.visualStyle as VisualStyle)
+    }
+    setEditedScript(draft.editedScript)
+    setEditedScenes(draft.editedScenes)
+    setManualImageModes(draft.manualImageModes)
+    setManualNarrationSource(draft.manualNarrationSource)
+    setPersistedManualNarration(draft.persistedManualNarration)
+    setExistingSubtitles(draft.existingSubtitles)
+    setExistingSourceVideoPath(draft.existingSourceVideoPath)
+    setExistingSourceVideoUrl(draft.existingSourceVideoUrl)
+    setBackgroundMusic(draft.backgroundMusic)
+    setBackgroundMusicVolume(draft.backgroundMusicVolume)
+    setMotionEffect(draft.motionEffect)
+    setMotionIntensity(draft.motionIntensity)
+    setSubtitleStyle(draft.subtitleStyle)
+    setBrandingEnabled(draft.brandingEnabled)
+    setBrandingLogoPath(draft.brandingLogoPath)
+    setBrandingLogoUrl(draft.brandingLogoUrl)
+    setBrandingPosition(draft.brandingPosition)
+    setBrandingSize(draft.brandingSize)
+    setBrandingOpacity(draft.brandingOpacity)
+    setEditMode(draft.editMode)
+    setProjectSavedAt(draft.savedAt)
+    if (draft.latestResult && !draft.activeRenderJobId) {
+      setResult(draft.latestResult as VideoResponse)
+      setVideoVersion(v => v + 1)
+    }
+    if (draft.activeRenderJobId) {
+      setActiveRenderJobId(draft.activeRenderJobId)
+      void resumeRenderJobIfNeeded(draft.activeRenderJobId, false)
+    }
+    draftHydratedRef.current = true
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    if (!draftHydratedRef.current) return
+    if (autosaveTimerRef.current !== undefined) {
+      window.clearTimeout(autosaveTimerRef.current)
+    }
+    autosaveTimerRef.current = window.setTimeout(() => {
+      persistProjectDraft()
+    }, 800)
+    return () => {
+      if (autosaveTimerRef.current !== undefined) {
+        window.clearTimeout(autosaveTimerRef.current)
+      }
+    }
+  }, [
+    persistProjectDraft,
+    creationMode,
+    topic,
+    style,
+    videoType,
+    duration,
+    aspectRatio,
+    imageFitMode,
+    visualStyle,
+    editedScript,
+    editedScenes,
+    manualImageModes,
+    manualNarrationSource,
+    persistedManualNarration,
+    existingSubtitles,
+    existingSourceVideoPath,
+    existingSourceVideoUrl,
+    backgroundMusic,
+    backgroundMusicVolume,
+    motionEffect,
+    motionIntensity,
+    subtitleStyle,
+    brandingEnabled,
+    brandingLogoPath,
+    brandingLogoUrl,
+    brandingPosition,
+    brandingSize,
+    brandingOpacity,
+    activeRenderJobId,
+    result,
+    editMode,
+  ])
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible' || !activeRenderJobId) return
+      void resumeRenderJobIfNeeded(activeRenderJobId, true)
+    }
+    const onFocus = () => {
+      if (activeRenderJobId) void resumeRenderJobIfNeeded(activeRenderJobId, true)
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', onFocus)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [activeRenderJobId, resumeRenderJobIfNeeded])
+
+  useEffect(() => () => stopJobPolling(), [])
+
+  useEffect(() => {
     fetchYoutubeStatus().catch(() => undefined)
 
     const allowedOrigins = ['http://localhost:8000', 'http://127.0.0.1:8000']
@@ -1511,7 +1944,7 @@ export const App: React.FC = () => {
   }, [])
 
   useEffect(() => {
-    if (!loading) return
+    if (!loading || activeRenderJobId) return
 
     const stagePlanByProfile: Record<GenerationProfile, { threshold: number; label: string }[]> = {
       ai: [
@@ -1563,7 +1996,7 @@ export const App: React.FC = () => {
     }, 650)
 
     return () => window.clearInterval(id)
-  }, [loading, generationProfile])
+  }, [loading, generationProfile, activeRenderJobId])
 
   useEffect(() => {
     const el = musicPreviewRef.current
@@ -1760,6 +2193,14 @@ export const App: React.FC = () => {
               <span className="status-dot" />
               {loading ? 'Generating' : result ? 'Ready' : 'Idle'} · Backend
             </div>
+            {projectSavedAt ? (
+              <span className="project-save-status" title={`Saved ${projectSavedAt}`}>
+                Project saved locally
+              </span>
+            ) : null}
+            <button type="button" className="button button-secondary button-compact" onClick={handleClearSavedProject}>
+              Clear saved project
+            </button>
             {result ? (
               <button type="button" className="button button-secondary" onClick={resetToNewVideo}>
                 Start new video
@@ -1767,6 +2208,12 @@ export const App: React.FC = () => {
             ) : null}
           </div>
         </header>
+
+        {renderReconnectNotice ? (
+          <div className="reconnect-notice" role="status">
+            {renderReconnectNotice}
+          </div>
+        ) : null}
 
         {(loading || error) && (
           <div className="global-status-bar" aria-live="polite">
@@ -1776,7 +2223,7 @@ export const App: React.FC = () => {
                   {generationStage || 'Generating your video...'}
                 </div>
                 <div className="generation-progress-meta">
-                  Estimated progress: {Math.floor(generationProgress)}%
+                  {activeRenderJobId ? 'Progress' : 'Estimated progress'}: {Math.floor(generationProgress)}%
                 </div>
                 <div className="generation-progress-bar">
                   <div
@@ -2367,7 +2814,10 @@ export const App: React.FC = () => {
                         src={existingVideoPreviewSrc}
                         onTimeUpdate={e => syncExistingVideoPreviewTime(e.currentTarget)}
                         onSeeked={e => syncExistingVideoPreviewTime(e.currentTarget)}
-                        onLoadedMetadata={e => syncExistingVideoPreviewTime(e.currentTarget)}
+                        onLoadedMetadata={e => {
+                          syncExistingVideoPreviewTime(e.currentTarget)
+                          syncExistingVideoLayout(e.currentTarget)
+                        }}
                         onPause={() => {
                           if (activeExistingSubtitlePreviewId) {
                             existingSubtitlePreviewEndRef.current = null
@@ -2375,11 +2825,13 @@ export const App: React.FC = () => {
                           }
                         }}
                       />
-                      {activeExistingSubtitle && (
-                        <div className={`existing-subtitle-overlay existing-subtitle-overlay--${subtitleStyle}`}>
-                          {activeExistingSubtitle.text}
-                        </div>
-                      )}
+                      {activeExistingSubtitle && isExistingSubtitleStyle(subtitleStyle) && (
+                          <ExistingVideoSubtitleOverlay
+                            text={activeExistingSubtitle.text}
+                            style={subtitleStyle}
+                            layout={existingVideoLayout}
+                          />
+                        )}
                     </div>
                   </div>
                 ) : null}
@@ -2462,6 +2914,28 @@ export const App: React.FC = () => {
                           value={item.text}
                           onChange={e => updateExistingSubtitle(item.id, { text: e.target.value })}
                         />
+                        {subtitleStyle !== 'off' && (() => {
+                          const charCount = item.text.trim().length
+                          const maxRec = getRecommendedSubtitleMaxChars(subtitleStyle, existingVideoPortrait)
+                          const fit =
+                            charCount > 0 && isExistingSubtitleStyle(subtitleStyle)
+                              ? wrapSubtitlePreviewLines(item.text, subtitleStyle, existingVideoLayout)
+                              : null
+                          const tooLong = charCount > maxRec || Boolean(fit?.truncated)
+                          return (
+                            <>
+                              <p className="footer-hint subtitle-char-guidance">
+                                {charCount} characters · recommended max ~{maxRec}
+                              </p>
+                              {tooLong ? (
+                                <p className="footer-hint footer-hint--warning">
+                                  This may be too long for one subtitle. Consider splitting it into another
+                                  segment.
+                                </p>
+                              ) : null}
+                            </>
+                          )
+                        })()}
                       </div>
                     ))}
                     </div>

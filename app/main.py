@@ -1,6 +1,7 @@
+import asyncio
 import json
 from pathlib import Path
-from typing import Any, List, Literal, Optional
+from typing import Any, Callable, List, Literal, Optional
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +22,9 @@ from .schemas import (
     MotionIntensity,
     PreviewSceneRequest,
     PreviewSceneResponse,
+    RenderJobListResponse,
+    RenderJobStartResponse,
+    RenderJobStatus,
     RenderSubtitlesVideoResponse,
     Scene,
     SubtitleItem,
@@ -33,9 +37,21 @@ from .schemas import (
     YouTubePublishRequest,
     YouTubePublishResponse,
 )
-from .services import image_service, script_service, tts_service, video_service, youtube_service
+from .services import image_service, render_job_service, script_service, tts_service, video_service, youtube_service
+
+ProgressFn = Callable[[str, float], None]
+
+
+def _noop_progress(_stage: str, _pct: float) -> None:
+    pass
+
 
 app = FastAPI(title="SacredClips API")
+
+
+@app.on_event("startup")
+def _startup_render_jobs() -> None:
+    render_job_service.init_render_jobs()
 
 # CORS so frontend (Vite dev server) can call backend
 app.add_middleware(
@@ -436,18 +452,23 @@ def _finalize_video_response(
     )
 
 
-def _regenerate_from_manual_request(req: ManualVideoRequest) -> VideoResponse:
+def _regenerate_from_manual_request(
+    req: ManualVideoRequest,
+    progress: ProgressFn = _noop_progress,
+) -> VideoResponse:
     """
     Images + TTS + render from structured scenes & script_text (edited script / scenes).
 
     Reuses uploaded scene images and uploaded narration paths when the client resends them.
     """
+    progress("preparing", 8)
     _, audio_dir, images_dir, videos_dir = _prepare_topic_dirs(req.topic)
     scenes_sorted = [_strip_scene_for_render(s) for s in _sort_scenes(req.scenes)]
     image_paths: List[str] = []
     scenes_for_finalize: List[Scene] = []
+    n_scenes = max(len(scenes_sorted), 1)
 
-    for s in scenes_sorted:
+    for i, s in enumerate(scenes_sorted):
         base_path = images_dir / f"scene_{s.index}_manual"
         mode = s.image_mode
 
@@ -505,6 +526,9 @@ def _regenerate_from_manual_request(req: ManualVideoRequest) -> VideoResponse:
             image_paths.append(rp)
             scenes_for_finalize.append(s.model_copy(update={"image_path": rp, "image_mode": "placeholder"}))
 
+        progress("images", 15 + (55 * (i + 1) / n_scenes))
+
+    progress("narration", 72)
     narr_source: Literal["tts", "upload"] = "tts"
     narr_path_out: Optional[str] = None
     if req.narration_source == "upload" and req.narration_audio_path:
@@ -526,6 +550,7 @@ def _regenerate_from_manual_request(req: ManualVideoRequest) -> VideoResponse:
             filename="voiceover.mp3",
         )
 
+    progress("rendering", 85)
     return _finalize_video_response(
         topic=req.topic,
         script_text=req.script_text,
@@ -555,11 +580,16 @@ def _regenerate_from_manual_request(req: ManualVideoRequest) -> VideoResponse:
 
 @app.post("/generate-video", response_model=VideoResponse)
 def generate_video(req: VideoRequest):
+    return _execute_generate_video(req)
+
+
+def _execute_generate_video(req: VideoRequest, progress: ProgressFn = _noop_progress) -> VideoResponse:
+    progress("preparing", 5)
     target_duration = _clamp_duration_by_aspect(req.duration_seconds, req.aspect_ratio)
 
     _, audio_dir, images_dir, videos_dir = _prepare_topic_dirs(req.topic)
 
-    # 1) Script + scenes (AI or fallback)
+    progress("script", 15)
     req_for_script = VideoRequest(
         topic=req.topic,
         style=req.style,
@@ -576,7 +606,7 @@ def generate_video(req: VideoRequest):
     script_text, scenes_raw, used_ai = script_service.generate_script(req_for_script)
     scenes_ordered = [_strip_scene_for_render(s) for s in _sort_scenes(scenes_raw)]
 
-    # 2) Generate images (one per scene)
+    progress("images", 35)
     per_scene_keywords = [s.keywords for s in scenes_ordered]
     scene_texts = [s.text for s in scenes_ordered]
     image_paths = image_service.generate_images_for_keywords(
@@ -588,13 +618,14 @@ def generate_video(req: VideoRequest):
         scene_texts=scene_texts,
     )
 
-    # 3) TTS audio from script_text
+    progress("narration", 65)
     audio_path = tts_service.text_to_speech(
         text=script_text,
         output_dir=str(audio_dir),
         filename="voiceover.mp3",
     )
 
+    progress("rendering", 85)
     branding = _branding_render_kwargs(
         req.branding_enabled,
         req.branding_logo_path,
@@ -603,6 +634,7 @@ def generate_video(req: VideoRequest):
         req.branding_opacity,
     )
 
+    progress("finalizing", 95)
     return _finalize_video_response(
         topic=req.topic,
         script_text=script_text,
@@ -622,6 +654,213 @@ def generate_video(req: VideoRequest):
         narration_audio_path=None,
         **branding,
     )
+
+
+def _job_record_to_status(rec: dict[str, Any]) -> RenderJobStatus:
+    return RenderJobStatus.model_validate(rec)
+
+
+def _run_async_in_thread(coro: Any) -> Any:
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+class _SnapshotUpload:
+    def __init__(self, data: bytes, filename: str) -> None:
+        self._data = data
+        self.filename = filename
+
+    async def read(self) -> bytes:
+        return self._data
+
+
+class _SnapshotForm:
+    """Thread-safe replay of multipart form fields for background render jobs."""
+
+    def __init__(
+        self,
+        fields: dict[str, str],
+        single_files: dict[str, _SnapshotUpload],
+        list_files: dict[str, list[_SnapshotUpload]],
+    ) -> None:
+        self._fields = fields
+        self._single_files = single_files
+        self._list_files = list_files
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key in self._single_files:
+            return self._single_files[key]
+        if key in self._list_files and self._list_files[key]:
+            return self._list_files[key][0]
+        return self._fields.get(key, default)
+
+    def getlist(self, key: str) -> list[Any]:
+        if key in self._list_files:
+            return self._list_files[key]
+        if key in self._single_files:
+            return [self._single_files[key]]
+        val = self._fields.get(key)
+        return [val] if val is not None else []
+
+    def keys(self) -> list[str]:
+        keys = set(self._fields.keys()) | set(self._single_files.keys()) | set(self._list_files.keys())
+        return list(keys)
+
+
+async def _snapshot_multipart_form(form: Any) -> _SnapshotForm:
+    fields: dict[str, str] = {}
+    single_files: dict[str, _SnapshotUpload] = {}
+    list_files: dict[str, list[_SnapshotUpload]] = {}
+    for key in form.keys():
+        vals = form.getlist(key)
+        uploads: list[_SnapshotUpload] = []
+        for val in vals:
+            if hasattr(val, "read"):
+                raw = await val.read()
+                filename = getattr(val, "filename", None) or "file"
+                uploads.append(_SnapshotUpload(raw or b"", str(filename)))
+            else:
+                fields[key] = str(val)
+        if uploads:
+            if len(uploads) == 1:
+                single_files[key] = uploads[0]
+            list_files[key] = uploads
+    return _SnapshotForm(fields, single_files, list_files)
+
+
+def _execute_render_subtitles(
+    *,
+    source_video: Path,
+    out_mp4: Path,
+    subtitle_items: List[SubtitleItem],
+    subtitle_style: SubtitleStyle,
+    branding: dict[str, Any],
+    progress: ProgressFn = _noop_progress,
+) -> RenderSubtitlesVideoResponse:
+    progress("rendering", 55)
+    video_service.render_subtitles_on_video(
+        video_path=str(source_video),
+        output_path=str(out_mp4),
+        subtitles=[s.model_dump() for s in subtitle_items],
+        subtitle_style=str(subtitle_style),
+        **branding,
+    )
+    progress("finalizing", 95)
+    abs_out = out_mp4.resolve()
+    return RenderSubtitlesVideoResponse(
+        video_path=str(abs_out),
+        video_url=_path_to_media_url(abs_out),
+        source_video_path=str(source_video.resolve()),
+        source_video_url=_path_to_media_url(source_video.resolve()),
+    )
+
+
+async def _prepare_subtitles_render(request: Request) -> tuple[
+    SubtitleStyle,
+    List[SubtitleItem],
+    Path,
+    Path,
+    dict[str, Any],
+]:
+    ct = (request.headers.get("content-type") or "").lower()
+    subtitle_style_raw: object
+    subtitles_raw: object
+    source_video: Path | None = None
+    branding: dict[str, Any]
+
+    if "multipart/form-data" in ct:
+        form = await request.form()
+        topic_val = form.get("topic")
+        if not isinstance(topic_val, str) or not topic_val.strip():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="topic is required")
+        topic = topic_val.strip()
+        topic_dir, _, _, _ = _prepare_topic_dirs(topic)
+        uploads_dir = topic_dir / "uploads"
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+
+        subtitle_style_raw = form.get("subtitle_style") or "minimal"
+        subtitles_raw = form.get("subtitles_json")
+        upload = form.get("video_upload")
+        if upload is not None and hasattr(upload, "read"):
+            filename = getattr(upload, "filename", None) or "uploaded_video.mp4"
+            suffix = Path(str(filename)).suffix.lower()
+            if suffix not in {".mp4", ".mov", ".mkv", ".webm"}:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="video_upload must be .mp4, .mov, .mkv, or .webm",
+                )
+            dest = uploads_dir / f"existing_video_upload{suffix}"
+            try:
+                raw = await upload.read()
+            except Exception as read_exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Could not read video_upload: {read_exc}",
+                ) from read_exc
+            if raw:
+                dest.write_bytes(raw)
+                source_video = dest.resolve()
+        else:
+            path_val = form.get("source_video_path") or form.get("video_path")
+            if isinstance(path_val, str):
+                source_video = _safe_resolved_file_under_dir(uploads_dir, path_val)
+
+        branding = _parse_branding_from_form(form)
+        logo_up = form.get("branding_logo_upload")
+        if logo_up is not None and hasattr(logo_up, "read"):
+            saved_logo = await _save_branding_logo_upload(logo_up)
+            if saved_logo:
+                branding = _branding_render_kwargs(
+                    _parse_bool_form(form.get("branding_enabled")),
+                    str(saved_logo),
+                    _normalize_branding_position(form.get("branding_position")),
+                    _normalize_branding_size(form.get("branding_size")),
+                    _clamp_branding_opacity(form.get("branding_opacity")),
+                )
+    else:
+        body = await request.json()
+        topic_val = body.get("topic")
+        if not isinstance(topic_val, str) or not topic_val.strip():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="topic is required")
+        topic = topic_val.strip()
+        topic_dir, _, _, _ = _prepare_topic_dirs(topic)
+        uploads_dir = topic_dir / "uploads"
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+        subtitle_style_raw = body.get("subtitle_style") or "minimal"
+        subtitles_raw = body.get("subtitles") or body.get("subtitles_json")
+        path_val = body.get("source_video_path") or body.get("video_path")
+        source_video = _safe_resolved_file_under_dir(uploads_dir, path_val if isinstance(path_val, str) else None)
+        branding = _parse_branding_from_dict(body)
+
+    if source_video is None or not source_video.is_file() or source_video.stat().st_size <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A valid uploaded video is required")
+
+    subtitle_style = _normalize_subtitle_style(subtitle_style_raw)
+    if isinstance(subtitles_raw, str):
+        try:
+            subtitle_items = TypeAdapter(List[SubtitleItem]).validate_json(subtitles_raw)
+        except ValidationError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.errors()) from exc
+    else:
+        try:
+            subtitle_items = TypeAdapter(List[SubtitleItem]).validate_python(subtitles_raw or [])
+        except ValidationError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.errors()) from exc
+
+    if subtitle_style != "off" and not subtitle_items:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Add at least one subtitle item, or choose subtitle style 'off'.",
+        )
+
+    topic_dir, _, _, _ = _prepare_topic_dirs(topic)
+    rendered_dir = topic_dir / "rendered"
+    rendered_dir.mkdir(parents=True, exist_ok=True)
+    out_mp4 = rendered_dir / "subtitled_video.mp4"
+    return subtitle_style, subtitle_items, source_video, out_mp4, branding
 
 
 @app.post("/generate-video-from-script", response_model=VideoResponse)
@@ -800,144 +1039,18 @@ async def render_subtitles_video(request: Request):
 
     Re-renders may omit `video_upload` and provide a safe `source_video_path` under the topic uploads folder.
     """
-    ct = (request.headers.get("content-type") or "").lower()
-    topic: str
-    subtitle_style_raw: object
-    subtitles_raw: object
-    source_video: Path | None = None
-
-    if "multipart/form-data" in ct:
-        form = await request.form()
-        topic_val = form.get("topic")
-        if not isinstance(topic_val, str) or not topic_val.strip():
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="topic is required")
-        topic = topic_val.strip()
-        topic_dir, _, _, _ = _prepare_topic_dirs(topic)
-        uploads_dir = topic_dir / "uploads"
-        rendered_dir = topic_dir / "rendered"
-        uploads_dir.mkdir(parents=True, exist_ok=True)
-        rendered_dir.mkdir(parents=True, exist_ok=True)
-
-        subtitle_style_raw = form.get("subtitle_style") or "minimal"
-        subtitles_raw = form.get("subtitles_json")
-        upload = form.get("video_upload")
-        if upload is not None and hasattr(upload, "read"):
-            filename = getattr(upload, "filename", None) or "uploaded_video.mp4"
-            suffix = Path(str(filename)).suffix.lower()
-            if suffix not in {".mp4", ".mov", ".mkv", ".webm"}:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="video_upload must be .mp4, .mov, .mkv, or .webm",
-                )
-            dest = uploads_dir / f"existing_video_upload{suffix}"
-            try:
-                raw = await upload.read()
-            except Exception as read_exc:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Could not read video_upload: {read_exc}",
-                ) from read_exc
-            if raw:
-                dest.write_bytes(raw)
-                source_video = dest.resolve()
-        else:
-            path_val = form.get("source_video_path") or form.get("video_path")
-            if isinstance(path_val, str):
-                source_video = _safe_resolved_file_under_dir(uploads_dir, path_val)
-    else:
-        body = await request.json()
-        topic_val = body.get("topic")
-        if not isinstance(topic_val, str) or not topic_val.strip():
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="topic is required")
-        topic = topic_val.strip()
-        topic_dir, _, _, _ = _prepare_topic_dirs(topic)
-        uploads_dir = topic_dir / "uploads"
-        rendered_dir = topic_dir / "rendered"
-        uploads_dir.mkdir(parents=True, exist_ok=True)
-        rendered_dir.mkdir(parents=True, exist_ok=True)
-        subtitle_style_raw = body.get("subtitle_style") or "minimal"
-        subtitles_raw = body.get("subtitles") or body.get("subtitles_json")
-        path_val = body.get("source_video_path") or body.get("video_path")
-        source_video = _safe_resolved_file_under_dir(uploads_dir, path_val if isinstance(path_val, str) else None)
-
-    if source_video is None or not source_video.is_file() or source_video.stat().st_size <= 0:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A valid uploaded video is required")
-
-    subtitle_style = _normalize_subtitle_style(subtitle_style_raw)
-    if isinstance(subtitles_raw, str):
-        try:
-            subtitle_items = TypeAdapter(List[SubtitleItem]).validate_json(subtitles_raw)
-        except ValidationError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.errors()) from exc
-    else:
-        try:
-            subtitle_items = TypeAdapter(List[SubtitleItem]).validate_python(subtitles_raw or [])
-        except ValidationError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.errors()) from exc
-
-    if subtitle_style != "off" and not subtitle_items:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Add at least one subtitle item, or choose subtitle style 'off'.",
-        )
-
-    branding: dict
-    if "multipart/form-data" in ct:
-        branding = _parse_branding_from_form(form)
-        logo_up = form.get("branding_logo_upload")
-        if logo_up is not None and hasattr(logo_up, "read"):
-            saved_logo = await _save_branding_logo_upload(logo_up)
-            if saved_logo:
-                branding = _branding_render_kwargs(
-                    _parse_bool_form(form.get("branding_enabled")),
-                    str(saved_logo),
-                    _normalize_branding_position(form.get("branding_position")),
-                    _normalize_branding_size(form.get("branding_size")),
-                    _clamp_branding_opacity(form.get("branding_opacity")),
-                )
-    else:
-        branding = _parse_branding_from_dict(body)
-
-    rendered_dir = topic_dir / "rendered"
-    rendered_dir.mkdir(parents=True, exist_ok=True)
-    out_mp4 = rendered_dir / "subtitled_video.mp4"
-    video_service.render_subtitles_on_video(
-        video_path=str(source_video),
-        output_path=str(out_mp4),
-        subtitles=[s.model_dump() for s in subtitle_items],
-        subtitle_style=str(subtitle_style),
-        **branding,
-    )
-    abs_out = out_mp4.resolve()
-    return RenderSubtitlesVideoResponse(
-        video_path=str(abs_out),
-        video_url=_path_to_media_url(abs_out),
-        source_video_path=str(source_video.resolve()),
-        source_video_url=_path_to_media_url(source_video.resolve()),
+    subtitle_style, subtitle_items, source_video, out_mp4, branding = await _prepare_subtitles_render(request)
+    return _execute_render_subtitles(
+        source_video=source_video,
+        out_mp4=out_mp4,
+        subtitle_items=subtitle_items,
+        subtitle_style=subtitle_style,
+        branding=branding,
     )
 
 
-@app.post("/manual-video", response_model=VideoResponse)
-async def manual_video(request: Request):
-    """
-    Local manual flow: user script + optional image uploads per scene index.
-    multipart/form-data fields:
-      - topic (str)
-      - script_text (str)
-      - scenes_json (JSON array of Scene objects without image_url required)
-      - narration_source (optional): tts | upload
-      - narration_audio_path (optional str): when narration_source=upload and no audio_upload,
-        reuse this file if it resolves under the topic audio directory
-      - visual_style (optional)
-      - duration_seconds (optional, ignored for render but kept for API parity)
-      - style (optional, ignored)
-    Optional file fields per scene: scene_upload_{scene.index}
-    Per scene: scene_image_mode_{index} in {upload, generate, placeholder}.
-    If mode is upload with no new scene_upload file, an existing image_path on that scene
-    (under the topic images directory) is reused.
-    """
-    form = await request.form()
-
+async def _manual_video_from_form(form: Any, progress: ProgressFn = _noop_progress) -> VideoResponse:
+    progress("preparing", 8)
     topic = form.get("topic")
     script_text = form.get("script_text")
     scenes_json = form.get("scenes_json")
@@ -996,8 +1109,9 @@ async def manual_video(request: Request):
     allowed_ext = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
     image_paths: List[str] = []
     scene_image_modes_record: List[str] = []
+    n_scenes = max(len(scenes_ordered), 1)
 
-    for s in scenes_ordered:
+    for i, s in enumerate(scenes_ordered):
         key = f"scene_upload_{s.index}"
         files = form.getlist(key)
         val = files[0] if files else None
@@ -1131,12 +1245,14 @@ async def manual_video(request: Request):
         print(f"[manual-video] scene={s.index} using image path: {dest.resolve()} (source=placeholder)")
         image_paths.append(str(dest.resolve()))
         scene_image_modes_record.append("placeholder")
+        progress("images", 15 + (50 * (i + 1) / n_scenes))
 
     scenes_ordered = [
         orig.model_copy(update={"image_path": pth, "image_mode": m})
         for orig, pth, m in zip(scenes_ordered, image_paths, scene_image_modes_record)
     ]
 
+    progress("narration", 72)
     if narration_source == "upload":
         audio_files = form.getlist("audio_upload")
         audio_val = audio_files[0] if audio_files else None
@@ -1213,6 +1329,7 @@ async def manual_video(request: Request):
                 _clamp_branding_opacity(form.get("branding_opacity")),
             )
 
+    progress("rendering", 85)
     return _finalize_video_response(
         topic=topic,
         script_text=script_text,
@@ -1232,6 +1349,29 @@ async def manual_video(request: Request):
         narration_audio_path=narr_resp_path,
         **branding,
     )
+
+
+@app.post("/manual-video", response_model=VideoResponse)
+async def manual_video(request: Request):
+    """
+    Local manual flow: user script + optional image uploads per scene index.
+    multipart/form-data fields:
+      - topic (str)
+      - script_text (str)
+      - scenes_json (JSON array of Scene objects without image_url required)
+      - narration_source (optional): tts | upload
+      - narration_audio_path (optional str): when narration_source=upload and no audio_upload,
+        reuse this file if it resolves under the topic audio directory
+      - visual_style (optional)
+      - duration_seconds (optional, ignored for render but kept for API parity)
+      - style (optional, ignored)
+    Optional file fields per scene: scene_upload_{scene.index}
+    Per scene: scene_image_mode_{index} in {upload, generate, placeholder}.
+    If mode is upload with no new scene_upload file, an existing image_path on that scene
+    (under the topic images directory) is reused.
+    """
+    form = await request.form()
+    return await _manual_video_from_form(form)
 
 
 async def _save_branding_logo_upload(upload) -> Path | None:
@@ -1407,3 +1547,76 @@ def publish_youtube(req: YouTubePublishRequest):
         youtube_video_id=video_id,
         youtube_url=url,
     )
+
+
+@app.post("/jobs/generate-video", response_model=RenderJobStartResponse)
+def job_generate_video(req: VideoRequest):
+    job_id = render_job_service.create_job("ai_generate")
+    render_job_service.submit_job(job_id, lambda progress: _execute_generate_video(req, progress))
+    return RenderJobStartResponse(job_id=job_id)
+
+
+@app.post("/jobs/regenerate-video", response_model=RenderJobStartResponse)
+def job_regenerate_video(req: ManualVideoRequest):
+    job_id = render_job_service.create_job("regenerate")
+    render_job_service.submit_job(
+        job_id,
+        lambda progress: _regenerate_from_manual_request(req, progress),
+    )
+    return RenderJobStartResponse(job_id=job_id)
+
+
+@app.post("/jobs/manual-video", response_model=RenderJobStartResponse)
+async def job_manual_video(request: Request):
+    form = await request.form()
+    snapshot = await _snapshot_multipart_form(form)
+    job_id = render_job_service.create_job("manual_video")
+
+    def _run(progress: ProgressFn) -> VideoResponse:
+        return _run_async_in_thread(_manual_video_from_form(snapshot, progress))
+
+    render_job_service.submit_job(job_id, _run)
+    return RenderJobStartResponse(job_id=job_id)
+
+
+@app.post("/jobs/render-subtitles-video", response_model=RenderJobStartResponse)
+async def job_render_subtitles_video(request: Request):
+    subtitle_style, subtitle_items, source_video, out_mp4, branding = await _prepare_subtitles_render(
+        request,
+    )
+    job_id = render_job_service.create_job("render_subtitles")
+
+    def _run(progress: ProgressFn) -> RenderSubtitlesVideoResponse:
+        progress("preparing", 10)
+        return _execute_render_subtitles(
+            source_video=source_video,
+            out_mp4=out_mp4,
+            subtitle_items=subtitle_items,
+            subtitle_style=subtitle_style,
+            branding=branding,
+            progress=progress,
+        )
+
+    render_job_service.submit_job(job_id, _run)
+    return RenderJobStartResponse(job_id=job_id)
+
+
+@app.get("/jobs/{job_id}", response_model=RenderJobStatus)
+def get_render_job(job_id: str):
+    rec = render_job_service.get_job(job_id)
+    if not rec:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    return _job_record_to_status(rec)
+
+
+@app.get("/jobs", response_model=RenderJobListResponse)
+def list_render_jobs(limit: int = 20):
+    jobs = [_job_record_to_status(rec) for rec in render_job_service.list_latest_jobs(limit=limit)]
+    return RenderJobListResponse(jobs=jobs)
+
+
+@app.get("/jobs/latest", response_model=RenderJobListResponse)
+def list_render_jobs_latest(limit: int = 20):
+    """Alias for listing recent jobs (recovery helper)."""
+    jobs = [_job_record_to_status(rec) for rec in render_job_service.list_latest_jobs(limit=limit)]
+    return RenderJobListResponse(jobs=jobs)
